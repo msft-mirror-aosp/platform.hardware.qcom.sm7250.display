@@ -64,16 +64,39 @@ DisplayError HWPeripheralDRM::Init() {
     return ret;
   }
 
-  scalar_data_.resize(hw_resource_.hw_dest_scalar_info.count);
-  dest_scalar_cache_.resize(hw_resource_.hw_dest_scalar_info.count);
+  InitDestScaler();
+
   PopulateBitClkRates();
 
-  topology_control_ = UINT32(sde_drm::DRMTopologyControl::DSPP);
-  if (hw_panel_info_.is_primary_panel) {
-    topology_control_ |= UINT32(sde_drm::DRMTopologyControl::DEST_SCALER);
+  return kErrorNone;
+}
+
+void HWPeripheralDRM::InitDestScaler() {
+  if (hw_panel_info_.is_primary_panel && hw_resource_.hw_dest_scalar_info.count) {
+    // Do all destination scaler block resource allocations here.
+    dest_scaler_blocks_used_ = 1;
+    if (kQuadSplit == mixer_attributes_.split_type) {
+      dest_scaler_blocks_used_ = 4;
+    } else if (kDualSplit == mixer_attributes_.split_type) {
+      dest_scaler_blocks_used_ = 2;
+    }
+    if (hw_resource_.hw_dest_scalar_info.count >=
+        (hw_dest_scaler_blocks_used_ + dest_scaler_blocks_used_)) {
+      // Enough destination scaler blocks available so update the static counter.
+      hw_dest_scaler_blocks_used_ += dest_scaler_blocks_used_;
+    } else {
+      dest_scaler_blocks_used_ = 0;
+    }
+    scalar_data_.resize(dest_scaler_blocks_used_);
+    dest_scalar_cache_.resize(dest_scaler_blocks_used_);
+    // Update crtc (layer-mixer) configuration info.
+    mixer_attributes_.dest_scaler_blocks_used = dest_scaler_blocks_used_;
   }
 
-  return kErrorNone;
+  topology_control_ = UINT32(sde_drm::DRMTopologyControl::DSPP);
+  if (dest_scaler_blocks_used_) {
+    topology_control_ |= UINT32(sde_drm::DRMTopologyControl::DEST_SCALER);
+  }
 }
 
 void HWPeripheralDRM::PopulateBitClkRates() {
@@ -91,17 +114,21 @@ void HWPeripheralDRM::PopulateBitClkRates() {
       if (std::find(bitclk_rates_.begin(), bitclk_rates_.end(), mode_info.bit_clk_rate) ==
             bitclk_rates_.end()) {
         bitclk_rates_.push_back(mode_info.bit_clk_rate);
-        DLOGI("Possible bit_clk_rates %d", mode_info.bit_clk_rate);
+        DLOGI("Possible bit_clk_rates %" PRIu64 , mode_info.bit_clk_rate);
       }
     }
   }
 
   hw_panel_info_.bitclk_rates = bitclk_rates_;
-  DLOGI("bit_clk_rates Size %d", bitclk_rates_.size());
+  DLOGI("bit_clk_rates Size %zu", bitclk_rates_.size());
 }
 
 DisplayError HWPeripheralDRM::SetDynamicDSIClock(uint64_t bit_clk_rate) {
   if (last_power_mode_ == DRMPowerMode::DOZE_SUSPEND || last_power_mode_ == DRMPowerMode::OFF) {
+    return kErrorNotSupported;
+  }
+
+  if (doze_poms_switch_done_ || pending_poms_switch_) {
     return kErrorNotSupported;
   }
 
@@ -114,6 +141,38 @@ DisplayError HWPeripheralDRM::SetDynamicDSIClock(uint64_t bit_clk_rate) {
 DisplayError HWPeripheralDRM::GetDynamicDSIClock(uint64_t *bit_clk_rate) {
   // Update bit_rate corresponding to current refresh rate.
   *bit_clk_rate = (uint32_t)connector_info_.modes[current_mode_index_].bit_clk_rate;
+
+  return kErrorNone;
+}
+
+
+DisplayError HWPeripheralDRM::SetRefreshRate(uint32_t refresh_rate) {
+  if (doze_poms_switch_done_ || pending_poms_switch_) {
+    // poms switch in progress
+    // Defer any refresh rate setting.
+    return kErrorNotSupported;
+  }
+
+  DisplayError error = HWDeviceDRM::SetRefreshRate(refresh_rate);
+  if (error != kErrorNone) {
+    return error;
+  }
+
+  return kErrorNone;
+}
+
+DisplayError HWPeripheralDRM::SetDisplayMode(const HWDisplayMode hw_display_mode) {
+  if (doze_poms_switch_done_ || pending_poms_switch_) {
+    return kErrorNotSupported;
+  }
+
+  DisplayError error = HWDeviceDRM::SetDisplayMode(hw_display_mode);
+  if (error != kErrorNone) {
+    return error;
+  }
+
+  // update bit clk rates.
+  hw_panel_info_.bitclk_rates = bitclk_rates_;
 
   return kErrorNone;
 }
@@ -153,6 +212,15 @@ DisplayError HWPeripheralDRM::Commit(HWLayers *hw_layers) {
 
   // Initialize to default after successful commit
   synchronous_commit_ = false;
+  active_ = true;
+
+  if (pending_poms_switch_) {
+    HWDeviceDRM::SetDisplayMode(kModeCommand);
+    hw_panel_info_.bitclk_rates = bitclk_rates_;
+    doze_poms_switch_done_ = true;
+    pending_poms_switch_ = false;
+  }
+
   idle_pc_state_ = sde_drm::DRMIdlePCState::NONE;
 
   return error;
@@ -165,11 +233,11 @@ void HWPeripheralDRM::ResetDestScalarCache() {
 }
 
 void HWPeripheralDRM::SetDestScalarData(const HWLayersInfo &hw_layer_info) {
-  if (!hw_scale_ || !hw_resource_.hw_dest_scalar_info.count) {
+  if (!hw_scale_ || !dest_scaler_blocks_used_) {
     return;
   }
 
-  for (uint32_t i = 0; i < hw_resource_.hw_dest_scalar_info.count; i++) {
+  for (uint32_t i = 0; i < dest_scaler_blocks_used_; i++) {
     auto it = hw_layer_info.dest_scale_info_map.find(i);
 
     if (it == hw_layer_info.dest_scale_info_map.end()) {
@@ -238,7 +306,7 @@ DisplayError HWPeripheralDRM::SetDppsFeature(void *payload, size_t size) {
   uint64_t value = 0;
 
   if (size != sizeof(DppsFeaturePayload)) {
-    DLOGE("invalid payload size %d, expected %d", size, sizeof(DppsFeaturePayload));
+    DLOGE("invalid payload size %zu, expected %zu", size, sizeof(DppsFeaturePayload));
     return kErrorParameters;
   }
 
@@ -252,7 +320,7 @@ DisplayError HWPeripheralDRM::SetDppsFeature(void *payload, size_t size) {
       DisplayDppsAd4RoiCfg *params = reinterpret_cast<DisplayDppsAd4RoiCfg *>
                                                       (feature_payload->value);
       if (!params) {
-        DLOGE("invalid playload value %d", feature_payload->value);
+        DLOGE("invalid playload value %" PRIu64, feature_payload->value);
         return kErrorNotSupported;
       }
 
@@ -282,7 +350,7 @@ DisplayError HWPeripheralDRM::SetDppsFeature(void *payload, size_t size) {
 
 DisplayError HWPeripheralDRM::GetDppsFeatureInfo(void *payload, size_t size) {
   if (size != sizeof(DRMDppsFeatureInfo)) {
-    DLOGE("invalid payload size %d, expected %d", size, sizeof(DRMDppsFeatureInfo));
+    DLOGE("invalid payload size %zu, expected %zu", size, sizeof(DRMDppsFeatureInfo));
     return kErrorParameters;
   }
   DRMDppsFeatureInfo *feature_info = reinterpret_cast<DRMDppsFeatureInfo *>(payload);
@@ -462,6 +530,12 @@ DisplayError HWPeripheralDRM::PowerOn(const HWQosData &qos_data,
     return kErrorDeferred;
   }
 
+  if (switch_mode_valid_ && doze_poms_switch_done_ && (current_mode_index_ == cmd_mode_index_)) {
+    HWDeviceDRM::SetDisplayMode(kModeVideo);
+    hw_panel_info_.bitclk_rates = bitclk_rates_;
+    doze_poms_switch_done_ = false;
+  }
+
   if (!idle_pc_enabled_) {
     drm_atomic_intf_->Perform(sde_drm::DRMOps::CRTC_SET_IDLE_PC_STATE, token_.crtc_id,
                               sde_drm::DRMIdlePCState::ENABLE);
@@ -479,13 +553,81 @@ DisplayError HWPeripheralDRM::PowerOn(const HWQosData &qos_data,
   }
   idle_pc_state_ = sde_drm::DRMIdlePCState::NONE;
   idle_pc_enabled_ = true;
+  pending_poms_switch_ = false;
+  active_ = true;
 
   CacheDestScalarData();
 
   return kErrorNone;
 }
 
+DisplayError HWPeripheralDRM::PowerOff(bool teardown) {
+  DTRACE_SCOPED();
+
+  DisplayError err = HWDeviceDRM::PowerOff(teardown);
+  if (err != kErrorNone) {
+    return err;
+  }
+
+  pending_poms_switch_ = false;
+  active_ = false;
+
+  return kErrorNone;
+}
+
+DisplayError HWPeripheralDRM::Doze(const HWQosData &qos_data, shared_ptr<Fence> *release_fence) {
+  DTRACE_SCOPED();
+
+  if (!first_cycle_ && switch_mode_valid_ && !doze_poms_switch_done_ &&
+    (current_mode_index_ == video_mode_index_)) {
+    if (active_) {
+      HWDeviceDRM::SetDisplayMode(kModeCommand);
+      hw_panel_info_.bitclk_rates = bitclk_rates_;
+      doze_poms_switch_done_ = true;
+    } else {
+      pending_poms_switch_ = true;
+    }
+  }
+
+  DisplayError err = HWDeviceDRM::Doze(qos_data, release_fence);
+  if (err != kErrorNone) {
+    return err;
+  }
+
+  if (first_cycle_) {
+    active_ = true;
+  }
+
+  return kErrorNone;
+}
+
+DisplayError HWPeripheralDRM::DozeSuspend(const HWQosData &qos_data,
+                                          shared_ptr<Fence> *release_fence) {
+  DTRACE_SCOPED();
+
+  if (switch_mode_valid_ && !doze_poms_switch_done_ &&
+    (current_mode_index_ == video_mode_index_)) {
+    HWDeviceDRM::SetDisplayMode(kModeCommand);
+    hw_panel_info_.bitclk_rates = bitclk_rates_;
+    doze_poms_switch_done_ = true;
+  }
+
+  DisplayError err = HWDeviceDRM::DozeSuspend(qos_data, release_fence);
+  if (err != kErrorNone) {
+    return err;
+  }
+
+  pending_poms_switch_ = false;
+  active_ = true;
+
+  return kErrorNone;
+}
+
 DisplayError HWPeripheralDRM::SetDisplayAttributes(uint32_t index) {
+  if (doze_poms_switch_done_ || pending_poms_switch_) {
+    return kErrorNotSupported;
+  }
+
   HWDeviceDRM::SetDisplayAttributes(index);
   // update bit clk rates.
   hw_panel_info_.bitclk_rates = bitclk_rates_;

@@ -148,6 +148,8 @@ int GLColorConvertImpl::CreateContext(GLRenderTarget target, bool secure) {
 
   ctx_.program_id = LoadProgram(1, &kVertexShader, count, fragment_shaders);
 
+  SetRealTimePriority();
+
   return 0;
 }
 
@@ -198,6 +200,10 @@ GLColorConvertImpl::~GLColorConvertImpl() {}
 GLColorConvertImpl::GLColorConvertImpl(GLRenderTarget target, bool secure) {
   target_ = target;
   secure_ = secure;
+}
+
+void GLColorConvertImpl::Reset() {
+  ClearCache();
 }
 
 }  // namespace sdm

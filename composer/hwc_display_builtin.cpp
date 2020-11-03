@@ -27,15 +27,18 @@
 * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
+#include <android-base/file.h>
 #include <cutils/properties.h>
-#include <sync/sync.h>
+#include <cutils/sockets.h>
 #include <utils/constants.h>
 #include <utils/debug.h>
 #include <utils/utils.h>
 #include <stdarg.h>
+#include <sync/sync.h>
 #include <sys/mman.h>
 
 #include <map>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -56,52 +59,27 @@ static void SetRect(LayerRect &src_rect, GLRect *target) {
 
 static std::string LoadPanelGammaCalibration() {
   constexpr char file[] = "/mnt/vendor/persist/display/gamma_calib_data.cal";
-  int fd = open(file, O_RDONLY);
-  if (fd < 0) {
+  std::ifstream ifs(file);
+
+  if (!ifs.is_open()) {
     DLOGW("Unable to open gamma calibration '%s', error = %s", file, strerror(errno));
     return {};
   }
 
-  struct stat info;
-  if (fstat(fd, &info) == -1) {
-    DLOGE("Unable to stat gamma calibration '%s', error = %s", file, strerror(errno));
-    close(fd);
-    return {};
+  std::string raw_data, gamma;
+  while (std::getline(ifs, raw_data, '\r')) {
+    gamma.append(raw_data.c_str());
+    gamma.append(" ");
+    std::getline(ifs, raw_data);
+  }
+  ifs.close();
+
+  /* eliminate space character in the last byte */
+  if (!gamma.empty()) {
+    gamma.pop_back();
   }
 
-  std::vector<char> buf(info.st_size);
-  char *ptr = buf.data();
-  ssize_t len;
-  while (((len = read(fd, ptr, info.st_size - (ptr - buf.data()))) != 0)) {
-    if (len > 0) {
-      ptr += len;
-    } else if ((errno != EINTR) && (errno != EAGAIN)) {
-      break;
-    }
-  }
-  close(fd);
-
-  if (len == 0) {
-    char *token, *saveptr = nullptr;
-    const char *delim = "\r\n";
-    std::string gamma;
-
-    token = strtok_r(buf.data(), delim, &saveptr);
-    while (token) {
-      gamma.append(token);
-      gamma.append(" ");
-      token = strtok_r(NULL, delim, &saveptr);
-    }
-
-    if (!gamma.empty()) {
-      gamma.pop_back();
-    }
-
-    return gamma;
-  } else {
-    DLOGE("Failed to read gamma calibration data, error = %s", strerror(errno));
-    return {};
-  }
+  return gamma;
 }
 
 static DisplayError WritePanelGammaTableToDriver(const std::string &gamma_data) {
@@ -227,7 +205,7 @@ int HWCDisplayBuiltIn::Init() {
   HWCDebugHandler::Get()->GetProperty(ENABLE_OPTIMIZE_REFRESH, &optimize_refresh);
   enable_optimize_refresh_ = (optimize_refresh == 1);
   if (enable_optimize_refresh_) {
-    DLOGI("Drop redundant drawcycles %d", id_);
+    DLOGI("Drop redundant drawcycles %" PRIu64 , id_);
   }
 
   int vsyncs = 0;
@@ -237,6 +215,27 @@ int HWCDisplayBuiltIn::Init() {
   }
 
   is_primary_ = display_intf_->IsPrimaryDisplay();
+
+  if (is_primary_) {
+    int enable_bw_limits = 0;
+    HWCDebugHandler::Get()->GetProperty(ENABLE_BW_LIMITS, &enable_bw_limits);
+    enable_bw_limits_ = (enable_bw_limits == 1);
+    if (enable_bw_limits_) {
+      DLOGI("Enable BW Limits %" PRIu64, id_);
+    }
+    windowed_display_ = Debug::GetWindowRect(&window_rect_.left, &window_rect_.top,
+                      &window_rect_.right, &window_rect_.bottom) != kErrorUndefined;
+    DLOGI("Window rect : [%f %f %f %f]", window_rect_.left, window_rect_.top,
+          window_rect_.right, window_rect_.bottom);
+  }
+
+  uint32_t config_index = 0;
+  GetActiveDisplayConfig(&config_index);
+  DisplayConfigVariableInfo attr = {};
+  GetDisplayAttributesForConfig(INT(config_index), &attr);
+  active_refresh_rate_ = attr.fps;
+
+  DLOGI("active_refresh_rate: %d", active_refresh_rate_);
 
   return status;
 }
@@ -382,7 +381,8 @@ HWC2::Error HWCDisplayBuiltIn::CommitStitchLayers() {
     Layer *stitch_layer = stitch_target_->GetSDMLayer();
     LayerBuffer &output_buffer = stitch_layer->input_buffer;
     ctx.dst_hnd = reinterpret_cast<const private_handle_t *>(output_buffer.buffer_id);
-    SetRect(layer->stitch_dst_rect, &ctx.dst_rect);
+    SetRect(layer->stitch_info.dst_rect, &ctx.dst_rect);
+    SetRect(layer->stitch_info.slice_rect, &ctx.scissor_rect);
     ctx.src_acquire_fence = input_buffer.acquire_fence;
 
     layer_stitch_task_.PerformTask(LayerStitchTaskCode::kCodeStitch, &ctx);
@@ -432,6 +432,78 @@ bool HWCDisplayBuiltIn::IsQsyncCallbackNeeded(bool *qsync_enabled, int32_t *refr
   return true;
 }
 
+int HWCDisplayBuiltIn::GetBwCode(const DisplayConfigVariableInfo &attr) {
+  uint32_t min_refresh_rate = 0, max_refresh_rate = 0;
+  display_intf_->GetRefreshRateRange(&min_refresh_rate, &max_refresh_rate);
+  uint32_t fps = attr.smart_panel ? attr.fps : max_refresh_rate;
+
+  if (fps <= 60) {
+    return kBwLow;
+  } else if (fps <= 90) {
+    return kBwMedium;
+  } else {
+    return kBwHigh;
+  }
+}
+
+void HWCDisplayBuiltIn::SetBwLimitHint(bool enable) {
+  if (!enable_bw_limits_) {
+    return;
+  }
+
+  if (!enable) {
+    thermal_bandwidth_client_cancel_request(const_cast<char*>(kDisplayBwName));
+    curr_refresh_rate_ = 0;
+    return;
+  }
+
+  uint32_t config_index = 0;
+  DisplayConfigVariableInfo attr = {};
+  GetActiveDisplayConfig(&config_index);
+  GetDisplayAttributesForConfig(INT(config_index), &attr);
+  if (attr.fps != curr_refresh_rate_ || attr.smart_panel != is_smart_panel_) {
+    int bw_code = GetBwCode(attr);
+    int req_data = thermal_bandwidth_client_merge_input_info(bw_code, 0);
+    int error = thermal_bandwidth_client_request(const_cast<char*>(kDisplayBwName), req_data);
+    if (error) {
+      DLOGE("Thermal bandwidth request failed %d", error);
+    }
+    curr_refresh_rate_ = attr.fps;
+    is_smart_panel_ = attr.smart_panel;
+  }
+}
+
+void HWCDisplayBuiltIn::SetPartialUpdate(DisplayConfigFixedInfo fixed_info) {
+  partial_update_enabled_ = fixed_info.partial_update || (!fixed_info.is_cmdmode);
+  for (auto hwc_layer : layer_set_) {
+    hwc_layer->SetPartialUpdate(partial_update_enabled_);
+  }
+  client_target_->SetPartialUpdate(partial_update_enabled_);
+}
+
+HWC2::Error HWCDisplayBuiltIn::SetPowerMode(HWC2::PowerMode mode, bool teardown) {
+  DisplayConfigFixedInfo fixed_info = {};
+  display_intf_->GetConfig(&fixed_info);
+  bool command_mode = fixed_info.is_cmdmode;
+
+  auto status = HWCDisplay::SetPowerMode(mode, teardown);
+  if (status != HWC2::Error::None) {
+    return status;
+  }
+
+  display_intf_->GetConfig(&fixed_info);
+  is_cmd_mode_ = fixed_info.is_cmdmode;
+  if (is_cmd_mode_ != command_mode) {
+    SetPartialUpdate(fixed_info);
+  }
+
+  if (mode == HWC2::PowerMode::Off) {
+    SetBwLimitHint(false);
+  }
+
+  return HWC2::Error::None;
+}
+
 HWC2::Error HWCDisplayBuiltIn::Present(shared_ptr<Fence> *out_retire_fence) {
   auto status = HWC2::Error::None;
 
@@ -447,6 +519,9 @@ HWC2::Error HWCDisplayBuiltIn::Present(shared_ptr<Fence> *out_retire_fence) {
     }
   } else {
     CacheAvrStatus();
+    DisplayConfigFixedInfo fixed_info = {};
+    display_intf_->GetConfig(&fixed_info);
+    bool command_mode = fixed_info.is_cmdmode;
 
     status = CommitStitchLayers();
     if (status != HWC2::Error::None) {
@@ -459,30 +534,29 @@ HWC2::Error HWCDisplayBuiltIn::Present(shared_ptr<Fence> *out_retire_fence) {
       HandleFrameOutput();
       PostCommitStitchLayers();
       status = HWCDisplay::PostCommitLayerStack(out_retire_fence);
+      SetBwLimitHint(true);
+      display_intf_->GetConfig(&fixed_info);
+      is_cmd_mode_ = fixed_info.is_cmdmode;
+      if (is_cmd_mode_ != command_mode) {
+        SetPartialUpdate(fixed_info);
+      }
     }
   }
 
-  if (CC_UNLIKELY(!has_init_light_server_)) {
-    using ILight = ::hardware::google::light::V1_0::ILight;
-    hardware_ILight_ = ILight::getService();
-    if (hardware_ILight_ != nullptr) {
-      hardware_ILight_->setHbm(false);
-    } else {
-      DLOGE("failed to get vendor light service");
-    }
-
+  if (CC_UNLIKELY(!has_config_hbm_threshold_)) {
     uint32_t panel_x, panel_y;
     GetPanelResolution(&panel_x, &panel_y);
     hbm_threshold_px_ = float(panel_x * panel_y) * hbm_threshold_pct_;
     DLOGI("Configure hbm_threshold_px_ to %f", hbm_threshold_px_);
 
-    has_init_light_server_ = true;
+    has_config_hbm_threshold_ = true;
   }
 
   const bool enable_hbm(hdr_largest_layer_px_ > hbm_threshold_px_);
-  if (high_brightness_mode_ != enable_hbm && hardware_ILight_ != nullptr) {
-    using ::android::hardware::light::V2_0::Status;
-    if (Status::SUCCESS == hardware_ILight_->setHbm(enable_hbm)) {
+  if (high_brightness_mode_ != enable_hbm) {
+    HbmState state = enable_hbm ? HbmState::HDR : HbmState::OFF;
+    auto status = SetHbm(state, HWC);
+    if (status == HWC2::Error::None) {
       high_brightness_mode_ = enable_hbm;
     } else {
       DLOGE("failed to setHbm to %d", enable_hbm);
@@ -848,7 +922,7 @@ int HWCDisplayBuiltIn::HandleSecureSession(const std::bitset<kSecureMax> &secure
       return err;
     }
 
-    DLOGI("SecureDisplay state changed from %d to %d for display %d-%d",
+    DLOGI("SecureDisplay state changed from %d to %d for display %" PRIu64 "-%d",
           active_secure_sessions_.test(kSecureDisplay), secure_sessions.test(kSecureDisplay),
           id_, type_);
   }
@@ -878,7 +952,8 @@ uint32_t HWCDisplayBuiltIn::GetOptimalRefreshRate(bool one_updating_layer) {
     return metadata_refresh_rate_;
   }
 
-  return max_refresh_rate_;
+  DLOGV_IF(kTagClient, "active_refresh_rate_: %d", active_refresh_rate_);
+  return active_refresh_rate_;
 }
 
 void HWCDisplayBuiltIn::SetIdleTimeoutMs(uint32_t timeout_ms) {
@@ -954,8 +1029,7 @@ HWC2::Error HWCDisplayBuiltIn::SetFrameDumpConfig(uint32_t count, uint32_t bit_m
 
   if (dump_output_to_file_) {
     if (cwb_client_ != kCWBClientNone) {
-      DLOGE("CWB is in use with client = %d", cwb_client_);
-      dump_output_to_file_ = false;
+      DLOGW("CWB is in use with client = %d", cwb_client_);
       return HWC2::Error::NoResources;
     }
   }
@@ -1168,7 +1242,7 @@ DisplayError HWCDisplayBuiltIn::SetDynamicDSIClock(uint64_t bitclk) {
   DisablePartialUpdateOneFrame();
   DisplayError error = display_intf_->SetDynamicDSIClock(bitclk);
   if (error != kErrorNone) {
-    DLOGE(" failed: Clk: %llu Error: %d", bitclk, error);
+    DLOGE(" failed: Clk: %" PRIu64 " Error: %d", bitclk, error);
     return error;
   }
 
@@ -1262,6 +1336,11 @@ HWC2::Error HWCDisplayBuiltIn::SetClientTarget(buffer_handle_t target,
     return error;
   }
 
+  // windowed_display and dynamic scaling are not supported.
+  if (windowed_display_) {
+    return HWC2::Error::None;
+  }
+
   Layer *sdm_layer = client_target_->GetSDMLayer();
   uint32_t fb_width = 0, fb_height = 0;
 
@@ -1282,6 +1361,16 @@ bool HWCDisplayBuiltIn::IsSmartPanelConfig(uint32_t config_id) {
   if (config_id < hwc_config_map_.size()) {
     uint32_t index = hwc_config_map_.at(config_id);
     return variable_config_map_.at(index).smart_panel;
+  }
+
+  return false;
+}
+
+bool HWCDisplayBuiltIn::HasSmartPanelConfig(void) {
+  for (auto &config : variable_config_map_) {
+    if (config.second.smart_panel) {
+      return true;
+    }
   }
 
   return false;
@@ -1308,8 +1397,8 @@ void HWCDisplayBuiltIn::OnTask(const LayerStitchTaskCode &task_code,
         DTRACE_SCOPED();
         LayerStitchContext* ctx = reinterpret_cast<LayerStitchContext*>(task_context);
         gl_layer_stitch_->Blit(ctx->src_hnd, ctx->dst_hnd, ctx->src_rect, ctx->dst_rect,
-                               ctx->src_acquire_fence, ctx->dst_acquire_fence,
-                               &(ctx->release_fence));
+                               ctx->scissor_rect, ctx->src_acquire_fence,
+                               ctx->dst_acquire_fence, &(ctx->release_fence));
       }
       break;
     case LayerStitchTaskCode::kCodeDestroyInstance: {
@@ -1441,6 +1530,82 @@ int HWCDisplayBuiltIn::PostInit() {
   }
 
   return 0;
+}
+
+bool HWCDisplayBuiltIn::HasReadBackBufferSupport() {
+  DisplayConfigFixedInfo fixed_info = {};
+  display_intf_->GetConfig(&fixed_info);
+
+  return fixed_info.readback_supported;
+}
+
+HWC2::Error HWCDisplayBuiltIn::ApplyHbmLocked() {
+  if (!mHasHbmNode)
+    return HWC2::Error::Unsupported;
+
+  HbmState state = HbmState::OFF;
+  for (auto req : mHbmSates) {
+    if (req == HbmState::SUNLIGHT) {
+      state = HbmState::SUNLIGHT;
+      break;
+    } else if (req == HbmState::HDR) {
+      state = HbmState::HDR;
+    }
+  }
+
+  if (state == mCurHbmState)
+    return HWC2::Error::None;
+
+  std::string action = std::to_string(static_cast<int>(state));
+  if (!android::base::WriteStringToFile(action, kHighBrightnessModeNode)) {
+    DLOGE("Failed to write hbm node = %s, error = %s ", kHighBrightnessModeNode, strerror(errno));
+  } else {
+    DLOGI("write %s to HBM sysfs file succeeded", action.c_str());
+  }
+
+  mCurHbmState = state;
+
+  return HWC2::Error::None;
+}
+
+bool HWCDisplayBuiltIn::IsHbmSupported() {
+  if (!mHasHbmNode)
+    return false;
+
+  bool is_hbm_supported = false;
+  std::string buffer;
+  if (!android::base::ReadFileToString(kHighBrightnessModeNode, &buffer)) {
+    DLOGE("Failed to read hbm node = %s, error = %s ", kHighBrightnessModeNode, strerror(errno));
+  } else if (buffer == "unsupported") {
+    DLOGI("kernel driver does not support hbm");
+  } else {
+    is_hbm_supported = true;
+  }
+
+  return is_hbm_supported;
+}
+
+HWC2::Error HWCDisplayBuiltIn::SetHbm(HbmState state, HbmClient client) {
+  auto status = HWC2::Error::None;
+  if (client >= CLIENT_MAX)
+    return HWC2::Error::BadParameter;
+
+  std::unique_lock<decltype(hbm_mutex)> lk(hbm_mutex);
+
+  /* save and apply the request state */
+  if (mHbmSates[client] != state) {
+    mHbmSates[client] = state;
+
+    status = ApplyHbmLocked();
+    if (INT32(status) != HWC2_ERROR_NONE)
+      DLOGE("Failed to apply hbm node, error = %d", status);
+  }
+
+  return status;
+}
+
+HbmState HWCDisplayBuiltIn::GetHbm() {
+  return mCurHbmState;
 }
 
 }  // namespace sdm

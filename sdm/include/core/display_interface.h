@@ -148,7 +148,8 @@ enum DisplayEvent {
   kIdlePowerCollapse,       // Event triggered by Idle Power Collapse.
   kPanelDeadEvent,          // Event triggered by ESD.
   kDisplayPowerResetEvent,  // Event triggered by Hardware Recovery.
-  kInvalidateDisplay,       // Event triggered to Invalidate display.
+  kInvalidateDisplay,       // Event triggered by DrawCycle thread to Invalidate display.
+  kSyncInvalidateDisplay,   // Event triggered by Non-DrawCycle threads to Invalidate display.
 };
 
 /*! @brief This enum represents the secure events received by Display HAL. */
@@ -201,6 +202,7 @@ struct DisplayConfigFixedInfo {
   float average_luminance = 0.0f;      //!< From Panel's average luminance
   float min_luminance = 0.0f;          //!< From Panel's blackness level
   bool partial_update = false;         //!< If display supports Partial Update.
+  bool readback_supported = false;     //!< If display supports buffer readback.
 };
 
 /*! @brief This structure defines configuration for variable properties of a display device.

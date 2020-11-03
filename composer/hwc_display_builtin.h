@@ -30,8 +30,8 @@
 #ifndef __HWC_DISPLAY_BUILTIN_H__
 #define __HWC_DISPLAY_BUILTIN_H__
 
+#include <thermal_client.h>
 #include <mutex>
-#include <hardware/google/light/1.0/ILight.h>
 #include <limits>
 #include <string>
 #include <vector>
@@ -61,6 +61,7 @@ struct LayerStitchContext : public SyncTask<LayerStitchTaskCode>::TaskContext {
   const private_handle_t* dst_hnd = nullptr;
   GLRect src_rect = {};
   GLRect dst_rect = {};
+  GLRect scissor_rect = {};
   shared_ptr<Fence> src_acquire_fence = nullptr;
   shared_ptr<Fence> dst_acquire_fence = nullptr;
   shared_ptr<Fence> release_fence = nullptr;
@@ -133,6 +134,7 @@ class HWCDisplayBuiltIn : public HWCDisplay, public SyncTask<LayerStitchTaskCode
   virtual HWC2::Error SetClientTarget(buffer_handle_t target, shared_ptr<Fence> acquire_fence,
                                       int32_t dataspace, hwc_region_t damage);
   virtual bool IsSmartPanelConfig(uint32_t config_id);
+  virtual bool HasSmartPanelConfig(void);
   virtual int Deinit();
   virtual bool IsQsyncCallbackNeeded(bool *qsync_enabled, int32_t *refresh_rate,
                                      int32_t *qsync_refresh_rate);
@@ -148,6 +150,12 @@ class HWCDisplayBuiltIn : public HWCDisplay, public SyncTask<LayerStitchTaskCode
       int32_t samples_size[NUM_HISTOGRAM_COLOR_COMPONENTS],
       uint64_t *samples[NUM_HISTOGRAM_COLOR_COMPONENTS]);
   void Dump(std::ostringstream *os) override;
+  virtual HWC2::Error SetPowerMode(HWC2::PowerMode mode, bool teardown);
+  virtual bool HasReadBackBufferSupport();
+
+  virtual bool IsHbmSupported() override;
+  virtual HWC2::Error SetHbm(HbmState state, HbmClient client) override;
+  virtual HbmState GetHbm() override;
 
  private:
   HWCDisplayBuiltIn(CoreInterface *core_intf, BufferAllocator *buffer_allocator,
@@ -174,10 +182,18 @@ class HWCDisplayBuiltIn : public HWCDisplay, public SyncTask<LayerStitchTaskCode
   bool AllocateStitchBuffer();
   void CacheAvrStatus();
   void PostCommitStitchLayers();
+  int GetBwCode(const DisplayConfigVariableInfo &attr);
+  void SetBwLimitHint(bool enable);
+  void SetPartialUpdate(DisplayConfigFixedInfo fixed_info);
+  HWC2::Error ApplyHbmLocked() REQUIRES(hbm_mutex);
 
   // SyncTask methods.
   void OnTask(const LayerStitchTaskCode &task_code,
               SyncTask<LayerStitchTaskCode>::TaskContext *task_context);
+
+  constexpr static int kBwLow = 2;
+  constexpr static int kBwMedium = 3;
+  constexpr static int kBwHigh = 4;
 
   BufferAllocator *buffer_allocator_ = nullptr;
   CPUHint *cpu_hint_ = nullptr;
@@ -200,7 +216,7 @@ class HWCDisplayBuiltIn : public HWCDisplay, public SyncTask<LayerStitchTaskCode
   bool frame_capture_buffer_queued_ = false;
   int frame_capture_status_ = -EAGAIN;
   bool is_primary_ = false;
-  bool disable_layer_stitch_ = false;
+  bool disable_layer_stitch_ = true;
   HWCLayer* stitch_target_ = nullptr;
   SyncTask<LayerStitchTaskCode> layer_stitch_task_;
   GLLayerStitch* gl_layer_stitch_ = nullptr;
@@ -217,13 +233,22 @@ class HWCDisplayBuiltIn : public HWCDisplay, public SyncTask<LayerStitchTaskCode
   std::mutex sampling_mutex;
   bool api_sampling_vote = false;
   bool vndservice_sampling_vote = false;
+  int curr_refresh_rate_ = 0;
+  bool is_smart_panel_ = false;
+  const char *kDisplayBwName = "display_bw";
+  bool enable_bw_limits_ = false;
 
   // Members for HBM feature
+  static constexpr const char kHighBrightnessModeNode[] =
+      "/sys/class/backlight/panel0-backlight/hbm_mode";
   static constexpr float hbm_threshold_pct_ = 0.5f;
+  const bool mHasHbmNode = !access(kHighBrightnessModeNode, F_OK);
+  std::mutex hbm_mutex;
   float hbm_threshold_px_ = std::numeric_limits<float>::max();
-  android::sp<hardware::google::light::V1_0::ILight> hardware_ILight_ = nullptr;
-  bool has_init_light_server_ = false;
+  bool has_config_hbm_threshold_ = false;
   bool high_brightness_mode_ = false;
+  HbmState mHbmSates[CLIENT_MAX] GUARDED_BY(hbm_mutex) = {HbmState::OFF};
+  HbmState mCurHbmState GUARDED_BY(hbm_mutex) = HbmState::OFF;
 };
 
 }  // namespace sdm

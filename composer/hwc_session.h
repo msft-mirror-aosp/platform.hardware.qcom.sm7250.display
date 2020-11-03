@@ -51,7 +51,6 @@
 using ::android::hardware::Return;
 using ::android::hardware::hidl_string;
 using android::hardware::hidl_handle;
-using ::android::hardware::hidl_vec;
 using ::android::sp;
 using ::android::hardware::Void;
 namespace composer_V2_4 = ::android::hardware::graphics::composer::V2_4;
@@ -195,8 +194,14 @@ class HWCSession : hwc2_device_t, HWCUEventListener, public qClient::BnQClient,
   uint32_t GetMaxVirtualDisplayCount();
   int32_t GetDisplayIdentificationData(hwc2_display_t display, uint8_t *outPort,
                                        uint32_t *outDataSize, uint8_t *outData);
+  int32_t GetDisplayCapabilities(hwc2_display_t display, uint32_t *outNumCapabilities,
+                                 uint32_t *capabilities);
+  int32_t GetDisplayCapabilities_2_4(hwc2_display_t display, uint32_t *outNumCapabilities,
+                                     uint32_t *capabilities);
   int32_t GetDisplayCapabilities(hwc2_display_t display,
                                  hidl_vec<HwcDisplayCapability> *capabilities);
+  int32_t GetDisplayCapabilities2_3(hwc2_display_t display,
+                                    uint32_t *outNumCapabilities, uint32_t *outCapabilities);
   int32_t GetDisplayBrightnessSupport(hwc2_display_t display, bool *outSupport);
   int32_t SetDisplayBrightness(hwc2_display_t display, float brightness);
   void WaitForResources(bool wait_for_resources, hwc2_display_t active_builtin_id,
@@ -289,10 +294,23 @@ class HWCSession : hwc2_device_t, HWCUEventListener, public qClient::BnQClient,
       const VsyncPeriodChangeConstraints *vsync_period_change_constraints,
       VsyncPeriodChangeTimeline *out_timeline);
 
+  int32_t SetAutoLowLatencyMode(hwc2_display_t display, bool on);
+  int32_t GetSupportedContentTypes(hwc2_display_t display, hidl_vec<HwcContentType> *types);
+  int32_t SetContentType(hwc2_display_t display, HwcContentType type);
+
   static Locker locker_[HWCCallbacks::kNumDisplays];
   static Locker power_state_[HWCCallbacks::kNumDisplays];
   static Locker hdr_locker_[HWCCallbacks::kNumDisplays];
   static Locker display_config_locker_;
+
+  void RegisterDisplayCallback();
+  bool IsHbmSupported();
+  void SetHbmState(HbmState state);
+  HbmState GetHbmState();
+  bool IsLbeSupported();
+  void SetLbeState(LbeState state);
+  void SetLbeAmbientLight(int value);
+  LbeState GetLbeState();
 
  private:
   class CWB {
@@ -362,13 +380,16 @@ class HWCSession : hwc2_device_t, HWCUEventListener, public qClient::BnQClient,
     virtual int IsHDRSupported(uint32_t disp_id, bool *supported);
     virtual int IsWCGSupported(uint32_t disp_id, bool *supported);
     virtual int SetLayerAsMask(uint32_t disp_id, uint64_t layer_id);
-    virtual int GetDebugProperty(const std::string prop_name, std::string value);
+    virtual int GetDebugProperty(const std::string prop_name, std::string value) {return -EINVAL;}
+    virtual int GetDebugProperty(const std::string prop_name, std::string *value);
     virtual int GetActiveBuiltinDisplayAttributes(DisplayConfig::Attributes *attr);
     virtual int SetPanelLuminanceAttributes(uint32_t disp_id, float min_lum, float max_lum);
     virtual int IsBuiltInDisplay(uint32_t disp_id, bool *is_builtin);
     virtual int IsAsyncVDSCreationSupported(bool *supported);
     virtual int CreateVirtualDisplay(uint32_t width, uint32_t height, int format);
-    virtual int GetSupportedDSIBitClks(uint32_t disp_id, std::vector<uint64_t> bit_clks);
+    virtual int GetSupportedDSIBitClks(uint32_t disp_id,
+                                       std::vector<uint64_t> bit_clks) {return -EINVAL;}
+    virtual int GetSupportedDSIBitClks(uint32_t disp_id, std::vector<uint64_t> *bit_clks);
     virtual int GetDSIClk(uint32_t disp_id, uint64_t *bit_clk);
     virtual int SetDSIClk(uint32_t disp_id, uint64_t bit_clk);
     virtual int SetCWBOutputBuffer(uint32_t disp_id, const DisplayConfig::Rect rect,
@@ -496,6 +517,9 @@ class HWCSession : hwc2_device_t, HWCUEventListener, public qClient::BnQClient,
   void NotifyClientStatus(bool connected);
   int32_t GetVirtualDisplayId();
   void PerformQsyncCallback(hwc2_display_t display);
+  bool isSmartPanelConfig(uint32_t disp_id, uint32_t config_id);
+
+  int SendLTMCommand(const char *cmd);
 
   CoreInterface *core_intf_ = nullptr;
   HWCDisplay *hwc_display_[HWCCallbacks::kNumDisplays] = {nullptr};
@@ -542,6 +566,18 @@ class HWCSession : hwc2_device_t, HWCUEventListener, public qClient::BnQClient,
   bool power_state_transition_[HWCCallbacks::kNumDisplays] = {};
   std::bitset<HWCCallbacks::kNumDisplays> display_ready_;
   bool secure_session_active_ = false;
+
+  int32_t is_lbe_supported_ = 0;
+  LbeState lbe_cur_state_ = LbeState::OFF;
+  int pps_socket_ = -1;
+  int8_t pps_retry = 5;
+  static constexpr const char *ltm_on_cmd_ = "Ltm:On:Primary:Auto";
+  static constexpr const char *ltm_off_cmd_ = "Ltm:Off:Primary";
+  static constexpr const char *ltm_lux_cmd_ = "Ltm:Als:Primary:";
+  static constexpr const char *ltm_default_mode_cmd_ = "Ltm:UserMode:Primary:default";
+  static constexpr const char *ltm_hbm_mode_cmd_ = "Ltm:UserMode:Primary:hbm";
+  static constexpr const char *ltm_power_save_mode_cmd_ = "Ltm:UserMode:Primary:power_save";
+  static constexpr const char *ltm_get_mode_cmd_ = "Ltm:GetUserMode:Primary";
 };
 }  // namespace sdm
 

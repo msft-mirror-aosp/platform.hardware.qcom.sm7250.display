@@ -167,5 +167,20 @@ void GLCommon::DestroyContext(GLContext* ctx) {
   EGL(eglTerminate(ctx->egl_display));
 }
 
+void GLCommon::ClearCache() {
+  // Clear cached handles.
+  image_wrapper_.Deinit();
+  image_wrapper_.Init();
+}
+
+void GLCommon::SetRealTimePriority() {
+  // same as composer thread
+  struct sched_param param = {0};
+  param.sched_priority = 2;
+  if (sched_setscheduler(0, SCHED_FIFO | SCHED_RESET_ON_FORK, &param) != 0) {
+    DLOGE("Couldn't set SCHED_FIFO: %d", errno);
+  }
+}
+
 }  // namespace sdm
 

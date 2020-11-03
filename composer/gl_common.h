@@ -64,6 +64,8 @@ class GLCommon {
   virtual void DeleteProgram(uint32_t id);
   virtual int WaitOnInputFence(const shared_ptr<Fence> &in_fence);
   virtual int CreateOutputFence(shared_ptr<Fence> *out_fence);
+  virtual void ClearCache();
+  virtual void SetRealTimePriority();
 
  protected:
   virtual ~GLCommon() { }

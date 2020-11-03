@@ -162,19 +162,22 @@ void QtiComposerClient::onVsync(hwc2_callback_data_t callbackData, hwc2_display_
 void QtiComposerClient::onVsync_2_4(hwc2_callback_data_t callbackData, hwc2_display_t display,
                                     int64_t timestamp, VsyncPeriodNanos vsyncPeriodNanos) {
   auto client = reinterpret_cast<QtiComposerClient*>(callbackData);
-  VsyncPeriodNanos vsync_period;
-  client->hwc_session_->GetDisplayVsyncPeriod(display, &vsync_period);
-  auto ret = client->callback24_->onVsync_2_4(display, timestamp, vsync_period);
+  auto ret = client->callback24_->onVsync_2_4(display, timestamp, vsyncPeriodNanos);
   ALOGW_IF(!ret.isOk(), "failed to send onVsync_2_4: %s. SF likely unavailable.",
            ret.description().c_str());
 }
 
 void QtiComposerClient::onVsyncPeriodTimingChanged(hwc2_callback_data_t callbackData,
-      hwc2_display_t display, const VsyncPeriodChangeTimeline& updatedTimeline) {
+      hwc2_display_t display, hwc_vsync_period_change_timeline_t *updatedTimeline) {
+   VsyncPeriodChangeTimeline timeline =
+                                   {updatedTimeline->newVsyncAppliedTimeNanos,
+                                    static_cast<bool>(updatedTimeline->refreshRequired),
+                                    updatedTimeline->refreshTimeNanos};
+
   auto client = reinterpret_cast<QtiComposerClient*>(callbackData);
-  auto ret = client->callback24_->onVsyncPeriodTimingChanged(display, updatedTimeline);
+  auto ret = client->callback24_->onVsyncPeriodTimingChanged(display, timeline);
   ALOGW_IF(!ret.isOk(), "failed to send onVsyncPeriodTimingChanged: %s. SF likely unavailable.",
-           ret.description().c_str());
+          ret.description().c_str());
 }
 
 void QtiComposerClient::onSeamlessPossible(hwc2_callback_data_t callbackData,
@@ -649,7 +652,7 @@ Return<Error> QtiComposerClient::setReadbackBuffer(uint64_t display, const hidl_
   }
 
   const native_handle_t* readbackBuffer;
-  getDisplayReadbackBuffer(display, buffer.getNativeHandle(), &readbackBuffer);
+  error = getDisplayReadbackBuffer(display, buffer.getNativeHandle(), &readbackBuffer);
   if (error != Error::NONE) {
     return error;
   }
@@ -959,8 +962,21 @@ Return<Error> QtiComposerClient::setColorMode_2_3(uint64_t display, common_V1_2:
 
 Return<void> QtiComposerClient::getDisplayCapabilities(uint64_t display,
                                                        getDisplayCapabilities_cb _hidl_cb) {
-  // We only care about passing VTS for older composer versions
-  // Not returning any capabilities that are optional
+  hidl_vec<composer_V2_3::IComposerClient::DisplayCapability> capabilities;
+  uint32_t count = 0;
+  auto error = hwc_session_->GetDisplayCapabilities(display, &count, nullptr);
+  if (error != HWC2_ERROR_NONE) {
+    _hidl_cb(static_cast<Error>(error), capabilities);
+    return Void();
+  }
+
+  capabilities.resize(count);
+  error = hwc_session_->GetDisplayCapabilities(
+      display, &count,
+      reinterpret_cast<std::underlying_type<composer_V2_3::IComposerClient::DisplayCapability>::type
+                           *>(capabilities.data()));
+
+  _hidl_cb(static_cast<Error>(error), capabilities);
   return Void();
 }
 
@@ -1034,10 +1050,42 @@ Return<void> QtiComposerClient::registerCallback_2_4(
   enableCallback(callback != nullptr);
   return Void();
 }
+
 Return<void> QtiComposerClient::getDisplayCapabilities_2_4(uint64_t display,
                                                            getDisplayCapabilities_2_4_cb _hidl_cb) {
-  hidl_vec<composer_V2_4::IComposerClient::DisplayCapability> capabilities;
-  auto error = hwc_session_->GetDisplayCapabilities(display, &capabilities);
+  hidl_vec<HwcDisplayCapability> capabilities;
+  uint32_t count = 0;
+  auto error = hwc_session_->GetDisplayCapabilities(display, &count, nullptr);
+  if (error != HWC2_ERROR_NONE) {
+    _hidl_cb(static_cast<composer_V2_4::Error>(error), capabilities);
+    return Void();
+  }
+
+  uint32_t count_2_4 = 0;
+  error = hwc_session_->GetDisplayCapabilities_2_4(display, &count_2_4, nullptr);
+  if (error != HWC2_ERROR_NONE) {
+    _hidl_cb(static_cast<composer_V2_4::Error>(error), capabilities);
+    return Void();
+  }
+
+  capabilities.resize(count + count_2_4);
+  error = hwc_session_->GetDisplayCapabilities(
+      display, &count,
+      reinterpret_cast<std::underlying_type<HwcDisplayCapability>::type *>(capabilities.data()));
+  if (error != HWC2_ERROR_NONE) {
+    _hidl_cb(static_cast<composer_V2_4::Error>(error), {});
+    return Void();
+  }
+
+  error = hwc_session_->GetDisplayCapabilities_2_4(
+      display, &count_2_4,
+      reinterpret_cast<std::underlying_type<HwcDisplayCapability>::type *>(capabilities.data() +
+                                                                           count));
+  if (error != HWC2_ERROR_NONE) {
+    _hidl_cb(static_cast<composer_V2_4::Error>(error), {});
+    return Void();
+  }
+
   _hidl_cb(static_cast<composer_V2_4::Error>(error), capabilities);
   return Void();
 }
@@ -1083,19 +1131,24 @@ Return<void> QtiComposerClient::setActiveConfigWithConstraints(
 }
 
 Return<composer_V2_4::Error> QtiComposerClient::setAutoLowLatencyMode(uint64_t display, bool on) {
-  return composer_V2_4::Error::UNSUPPORTED;
+  auto error = hwc_session_->SetAutoLowLatencyMode(display, on);
+
+  return static_cast<composer_V2_4::Error>(error);
 }
 
 Return<void> QtiComposerClient::getSupportedContentTypes(uint64_t display,
                                                          getSupportedContentTypes_cb _hidl_cb) {
-  hidl_vec<composer_V2_4::IComposerClient::ContentType> types = {};
-  _hidl_cb(composer_V2_4::Error::NONE, types);
+  hidl_vec<composer_V2_4::IComposerClient::ContentType> types;
+  auto error = hwc_session_->GetSupportedContentTypes(display, &types);
+  _hidl_cb(static_cast<composer_V2_4::Error>(error), types);
   return Void();
 }
 
 Return<composer_V2_4::Error> QtiComposerClient::setContentType(
     uint64_t display, composer_V2_4::IComposerClient::ContentType type) {
-  return composer_V2_4::Error::UNSUPPORTED;
+  auto error = hwc_session_->SetContentType(display, type);
+
+  return static_cast<composer_V2_4::Error>(error);
 }
 
 Return<void> QtiComposerClient::getLayerGenericMetadataKeys(
@@ -1117,6 +1170,11 @@ bool QtiComposerClient::CommandReader::parseCommonCmd(
   // Commands from ::android::hardware::graphics::composer::V2_1::IComposerClient follow.
   case IComposerClient::Command::SELECT_DISPLAY:
     parsed = parseSelectDisplay(length);
+    // Displays will not be removed while processing the command queue.
+    if (parsed && mClient.mDisplayData.find(mDisplay) == mClient.mDisplayData.end()) {
+      ALOGW("Command::SELECT_DISPLAY: Display %" PRId64 "not found. Dropping commands.", mDisplay);
+      mDisplay = sdm::HWCCallbacks::kNumDisplays;
+    }
     break;
   case IComposerClient::Command::SELECT_LAYER:
     parsed = parseSelectLayer(length);

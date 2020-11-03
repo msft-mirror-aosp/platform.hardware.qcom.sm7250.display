@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2019, The Linux Foundation. All rights reserved.
+* Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are
@@ -188,7 +188,9 @@ static void PopulateSecureModes(drmModePropertyRes *prop) {
 static InlineRotationVersion PopulateInlineRotationVersion(uint32_t ver) {
   switch (ver) {
     case 0x0000: return InlineRotationVersion::kInlineRotationNone;
-    case 0x0001: return InlineRotationVersion::kInlineRotationV1;
+    case 0x0001:
+    case 0x0100: return InlineRotationVersion::kInlineRotationV1;
+    case 0x0200: return InlineRotationVersion::kInlineRotationV2;
     default: return InlineRotationVersion::kInlineRotationNone;
   }
 }
@@ -433,7 +435,7 @@ void DRMPlane::GetTypeInfo(const PropertyMap &prop_map) {
   // We may have multiple lines with each one dedicated for something specific
   // like formats etc
   stringstream stream(fmt_str);
-  DRM_LOGI("stream str %s len %d blob str %s len %d", stream.str().c_str(), stream.str().length(),
+  DRM_LOGI("stream str %s len %zu blob str %s len %d", stream.str().c_str(), stream.str().length(),
            blob->data, blob->length);
 
   string line = {};
@@ -1042,8 +1044,7 @@ bool DRMPlane::SetDgmCscConfig(uint64_t handle) {
     }
     AddProperty(DRMProperty::CSC_DMA_V1, csc_v1_data, true);
     dgm_csc_in_use_ = (csc_v1_data != 0);
-    DRM_LOGV("Plane %d Dgm CSC = %lld in_use = %d", drm_plane_->plane_id, csc_v1_data,
-             dgm_csc_in_use_);
+    DRM_LOGV("Plane %d in_use = %d", drm_plane_->plane_id, dgm_csc_in_use_);
 
     return true;
   }

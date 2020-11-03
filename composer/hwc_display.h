@@ -21,6 +21,7 @@
 #define __HWC_DISPLAY_H__
 
 #include <QService.h>
+#include <aidl/com/google/hardware/pixel/display/BnDisplay.h>
 #include <android/hardware/graphics/common/1.2/types.h>
 #include <core/core_interface.h>
 #include <hardware/hwcomposer.h>
@@ -43,22 +44,23 @@
 #include "hwc_layers.h"
 #include "hwc_buffer_sync_handler.h"
 
-using android::hardware::graphics::common::V1_2::ColorMode;
+using android::hardware::hidl_vec;
 using android::hardware::graphics::common::V1_1::Dataspace;
 using android::hardware::graphics::common::V1_1::RenderIntent;
+using android::hardware::graphics::common::V1_2::ColorMode;
 using android::hardware::graphics::common::V1_2::Hdr;
 namespace composer_V2_4 = ::android::hardware::graphics::composer::V2_4;
 using HwcAttribute = composer_V2_4::IComposerClient::Attribute;
 using VsyncPeriodChangeConstraints = composer_V2_4::IComposerClient::VsyncPeriodChangeConstraints;
 using VsyncPeriodChangeTimeline = composer_V2_4::VsyncPeriodChangeTimeline;
 using VsyncPeriodNanos = composer_V2_4::VsyncPeriodNanos;
+using HwcContentType = composer_V2_4::IComposerClient::ContentType;
+using HbmState = ::aidl::com::google::hardware::pixel::display::HbmState;
+using LbeState = ::aidl::com::google::hardware::pixel::display::LbeState;
 
 namespace sdm {
 
 class HWCToneMapper;
-
-/* max customer extended render intent */
-#define MAX_EXTENDED_RENDER_INTENT    0x1ff
 
 // Subclasses set this to their type. This has to be different from DisplayType.
 // This is to avoid RTTI and dynamic_cast
@@ -101,6 +103,7 @@ class HWCColorMode {
   HWC2::Error Init();
   HWC2::Error DeInit();
   void Dump(std::ostringstream* os);
+  void SetApplyMode(bool enable);
   uint32_t GetColorModeCount();
   uint32_t GetRenderIntentCount(ColorMode mode);
   HWC2::Error GetColorModes(uint32_t *out_num_modes, ColorMode *out_modes);
@@ -162,6 +165,12 @@ class HWCDisplay : public DisplayEventHandler {
   enum PanelGammaSource {
     kGammaDefault,      // Resotre gamma table to default
     kGammaCalibration,  // Update gamma table from calibration file
+  };
+
+  enum HbmClient {
+    HWC = 0,
+    APP,
+    CLIENT_MAX,
   };
 
   struct HWCLayerStack {
@@ -235,6 +244,10 @@ class HWCDisplay : public DisplayEventHandler {
   }
 
   virtual bool IsSmartPanelConfig(uint32_t config_id) {
+    return false;
+  }
+
+  virtual bool HasSmartPanelConfig(void) {
     return false;
   }
 
@@ -417,8 +430,16 @@ class HWCDisplay : public DisplayEventHandler {
   virtual HWC2::Error SetActiveConfigWithConstraints(
       hwc2_config_t config, const VsyncPeriodChangeConstraints *vsync_period_change_constraints,
       VsyncPeriodChangeTimeline *out_timeline);
+  virtual HWC2::Error SetAutoLowLatencyMode(bool on) { return HWC2::Error::Unsupported; }
+  virtual HWC2::Error GetSupportedContentTypes(hidl_vec<HwcContentType> *types);
+  virtual HWC2::Error SetContentType(HwcContentType type);
 
   HWC2::Error SetDisplayElapseTime(uint64_t time);
+  virtual bool HasReadBackBufferSupport() { return false; }
+
+  virtual bool IsHbmSupported() { return false; }
+  virtual HWC2::Error SetHbm(HbmState state, HbmClient client) { return HWC2::Error::None; }
+  virtual HbmState GetHbm() { return HbmState::OFF; }
 
  protected:
   static uint32_t throttling_refresh_rate_;
@@ -530,6 +551,9 @@ class HWCDisplay : public DisplayEventHandler {
   std::deque<TransientRefreshRateInfo> transient_refresh_rate_info_;
   std::mutex transient_refresh_rate_lock_;
   float hdr_largest_layer_px_ = 0.0f;
+  LayerRect window_rect_ = {};
+  bool windowed_display_ = false;
+  uint32_t active_refresh_rate_ = 0;
 
  private:
   void DumpInputBuffers(void);

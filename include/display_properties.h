@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+* Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are
@@ -117,6 +117,9 @@
 #define CAMERA_NOC_EFFICIENCY_FACTOR         DISPLAY_PROP("camera_noc_efficiency_factor")
 #define ENABLE_HISTOGRAM_INTR                DISPLAY_PROP("enable_hist_intr")
 #define DEFER_FPS_FRAME_COUNT                DISPLAY_PROP("defer_fps_frame_count")
+#define ENABLE_BW_LIMITS                     DISPLAY_PROP("enable_bw_limits")
+#define DISABLE_ROTATOR_PRE_DOWNSCALER_PROP  DISPLAY_PROP("disable_pre_downscaler")
+#define DISABLE_INLINE_ROTATOR_UI_PROP       DISPLAY_PROP("disable_inline_rotator_ui")
 
 // Add all vendor.display properties above
 
@@ -129,7 +132,10 @@
 // Add all persist.vendor.display.properties above
 
 #define ZERO_SWAP_INTERVAL                   "vendor.debug.egl.swapinterval"
-
+#define WINDOW_RECT_PROP                     DISPLAY_PROP("window_rect")
+#define DISABLE_IDLE_TIME_HDR                DISPLAY_PROP("disable_idle_time_hdr")
+#define DISABLE_IDLE_TIME_VIDEO              DISPLAY_PROP("disable_idle_time_video")
+#define LBE_SUPPORTED                        DISPLAY_PROP("lbe.supported")
 // Add all other.properties above
 // End of property
 #endif  // __DISPLAY_PROPERTIES_H__

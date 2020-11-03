@@ -328,6 +328,10 @@ int HWCSession::DisplayConfigImpl::GetPanelBrightness(uint32_t *level) {
 int HWCSession::MinHdcpEncryptionLevelChanged(int disp_id, uint32_t min_enc_level) {
   DLOGI("Display %d", disp_id);
 
+  // SSG team hardcoded disp_id as external because it applies to external only but SSG team sends
+  // this level irrespective of external connected or not. So to honor the call, make disp_id to
+  // primary & set level.
+  disp_id = HWC_DISPLAY_PRIMARY;
   int disp_idx = GetDisplayIndex(disp_id);
   if (disp_idx == -1) {
     DLOGE("Invalid display = %d", disp_id);
@@ -335,15 +339,13 @@ int HWCSession::MinHdcpEncryptionLevelChanged(int disp_id, uint32_t min_enc_leve
   }
 
   SEQUENCE_WAIT_SCOPE_LOCK(locker_[disp_idx]);
-  if (disp_idx != HWC_DISPLAY_EXTERNAL) {
-    DLOGE("Not supported for display");
-  } else if (!hwc_display_[disp_idx]) {
-    DLOGW("Display is not connected");
-  } else {
-    return hwc_display_[disp_idx]->OnMinHdcpEncryptionLevelChange(min_enc_level);
+  HWCDisplay *hwc_display = hwc_display_[disp_idx];
+  if (!hwc_display) {
+    DLOGE("Display = %d is not connected.", disp_idx);
+    return -EINVAL;
   }
 
-  return -EINVAL;
+  return hwc_display->OnMinHdcpEncryptionLevelChange(min_enc_level);
 }
 
 int HWCSession::DisplayConfigImpl::MinHdcpEncryptionLevelChanged(DispType dpy,
@@ -569,7 +571,7 @@ int HWCSession::ControlIdlePowerCollapse(bool enable, bool synchronous) {
     return 0;
   }
 
-  DLOGW("Display = %d is not connected.", active_builtin_disp_id);
+  DLOGW("Display = %d is not connected.", UINT32(active_builtin_disp_id));
   return -ENODEV;
 }
 
@@ -800,14 +802,14 @@ int HWCSession::DisplayConfigImpl::SetLayerAsMask(uint32_t disp_id, uint64_t lay
 }
 
 int HWCSession::DisplayConfigImpl::GetDebugProperty(const std::string prop_name,
-                                                    std::string value) {
+                                                    std::string *value) {
   std::string vendor_prop_name = DISP_PROP_PREFIX;
   int error = -EINVAL;
   char val[64] = {};
 
   vendor_prop_name += prop_name.c_str();
   if (HWCDebugHandler::Get()->GetProperty(vendor_prop_name.c_str(), val) == kErrorNone) {
-    value = val;
+    *value = val;
     error = 0;
   }
 
@@ -820,7 +822,7 @@ int HWCSession::DisplayConfigImpl::GetActiveBuiltinDisplayAttributes(
   hwc2_display_t disp_id = hwc_session_->GetActiveBuiltinDisplay();
 
   if (disp_id >= HWCCallbacks::kNumDisplays) {
-    DLOGE("Invalid display = %d", disp_id);
+    DLOGE("Invalid display = %d", UINT32(disp_id));
   } else {
     if (hwc_session_->hwc_display_[disp_id]) {
       uint32_t config_index = 0;
@@ -887,13 +889,13 @@ int HWCSession::DisplayConfigImpl::IsBuiltInDisplay(uint32_t disp_id, bool *is_b
 }
 
 int HWCSession::DisplayConfigImpl::GetSupportedDSIBitClks(uint32_t disp_id,
-                                                           std::vector<uint64_t> bit_clks) {
+                                                          std::vector<uint64_t> *bit_clks) {
   SCOPE_LOCK(hwc_session_->locker_[disp_id]);
   if (!hwc_session_->hwc_display_[disp_id]) {
     return -EINVAL;
   }
 
-  hwc_session_->hwc_display_[disp_id]->GetSupportedDSIClock(&bit_clks);
+  hwc_session_->hwc_display_[disp_id]->GetSupportedDSIClock(bit_clks);
   return 0;
 }
 
@@ -926,7 +928,7 @@ int HWCSession::DisplayConfigImpl::SetCWBOutputBuffer(uint32_t disp_id,
     return -1;
   }
 
-  if (disp_id != qdutils::DISPLAY_PRIMARY) {
+  if (disp_id != UINT32(DisplayConfig::DisplayType::kPrimary)) {
     DLOGE("Only supported for primary display at present.");
     return -1;
   }
@@ -939,6 +941,7 @@ int HWCSession::DisplayConfigImpl::SetCWBOutputBuffer(uint32_t disp_id,
   // Output buffer dump is not supported, if External or Virtual display is present.
   int external_dpy_index = hwc_session_->GetDisplayIndex(qdutils::DISPLAY_EXTERNAL);
   int virtual_dpy_index = hwc_session_->GetDisplayIndex(qdutils::DISPLAY_VIRTUAL);
+  int primary_dpy_index = hwc_session_->GetDisplayIndex(qdutils::DISPLAY_PRIMARY);
 
   if (((external_dpy_index != -1) && hwc_session_->hwc_display_[external_dpy_index]) ||
       ((virtual_dpy_index != -1) && hwc_session_->hwc_display_[virtual_dpy_index])) {
@@ -949,13 +952,14 @@ int HWCSession::DisplayConfigImpl::SetCWBOutputBuffer(uint32_t disp_id,
   // Mutex scope
   {
     SCOPE_LOCK(hwc_session_->locker_[HWC_DISPLAY_PRIMARY]);
-    if (!hwc_session_->hwc_display_[disp_id]) {
+    if (!hwc_session_->hwc_display_[primary_dpy_index]) {
       DLOGE("Display is not created yet.");
       return -1;
     }
   }
 
-  return hwc_session_->cwb_.PostBuffer(callback_, post_processed, buffer);
+  return hwc_session_->cwb_.PostBuffer(callback_, post_processed,
+                                       native_handle_clone(buffer));
 }
 
 int32_t HWCSession::CWB::PostBuffer(std::weak_ptr<DisplayConfig::ConfigCallback> callback,
@@ -1044,6 +1048,8 @@ void HWCSession::CWB::ProcessRequests() {
       callback->NotifyCWBBufferDone(status, node->buffer);
     }
 
+    native_handle_close(node->buffer);
+    native_handle_delete(const_cast<native_handle_t *>(node->buffer));
     delete node;
 
     // Mutex scope
@@ -1141,7 +1147,7 @@ int HWCSession::DisplayConfigImpl::CreateVirtualDisplay(uint32_t width, uint32_t
   auto status = hwc_session_->CreateVirtualDisplayObj(width, height, &format,
                                                       &hwc_session_->virtual_id_);
   if (status == HWC2::Error::None) {
-    DLOGI("Created virtual display id:% " PRIu64 ", res: %dx%d",
+    DLOGI("Created virtual display id:%" PRIu64 ", res: %dx%d",
           hwc_session_->virtual_id_, width, height);
     if (active_builtin_disp_id < HWCCallbacks::kNumRealDisplays) {
       hwc_session_->WaitForResources(true, active_builtin_disp_id, hwc_session_->virtual_id_);

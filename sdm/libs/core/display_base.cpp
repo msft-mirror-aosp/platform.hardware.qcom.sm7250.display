@@ -229,7 +229,7 @@ DisplayError DisplayBase::BuildLayerStackStats(LayerStack *layer_stack) {
   }
 
   hw_layers_info.stitch_target_index = hw_layers_info.gpu_target_index + 1;
-  DLOGD_IF(kTagDisplay, "LayerStack layer_count: %d, app_layer_count: %d, "
+  DLOGD_IF(kTagDisplay, "LayerStack layer_count: %zu, app_layer_count: %d, "
                         "gpu_target_index: %d, stitch_index: %d game_present: %d, display: %d-%d",
                         layers.size(), hw_layers_info.app_layer_count,
                         hw_layers_info.gpu_target_index, hw_layers_info.stitch_target_index,
@@ -517,6 +517,7 @@ DisplayError DisplayBase::GetConfig(DisplayConfigFixedInfo *fixed_info) {
   fixed_info->hdr_eotf = hw_panel_info_.hdr_eotf;
   fixed_info->hdr_metadata_type_one = hw_panel_info_.hdr_metadata_type_one;
   fixed_info->partial_update = hw_panel_info_.partial_update;
+  fixed_info->readback_supported = hw_resource_info.has_concurrent_writeback;
 
   return kErrorNone;
 }
@@ -618,21 +619,27 @@ DisplayError DisplayBase::SetDisplayState(DisplayState state, bool teardown,
     return kErrorParameters;
   }
 
+  error = ReconfigureDisplay();
+  if (error != kErrorNone) {
+    return error;
+  }
+
   DisablePartialUpdateOneFrame();
 
   if (error == kErrorNone) {
-    if (!pending_doze_ && !pending_power_on_) {
-      active_ = active;
-      state_ = state;
-    }
-    comp_manager_->SetDisplayState(display_comp_ctx_, state,
-                            release_fence ? *release_fence : nullptr);
-
     // If previously requested doze state is still pending reset it on any new display state request
     // and handle the new request.
     if (state != kStateDoze) {
       pending_doze_ = false;
     }
+
+    if (!pending_doze_ && !pending_power_on_) {
+      active_ = active;
+      state_ = state;
+    }
+    comp_manager_->SetDisplayState(display_comp_ctx_, state,
+                                   release_fence ? *release_fence : nullptr);
+
     // If previously requested power on state is still pending reset it on any new display state
     // request and handle the new request.
     if (state != kStateOn) {
@@ -670,6 +677,8 @@ DisplayError DisplayBase::SetActiveConfig(uint32_t index) {
   if (error != kErrorNone) {
     return error;
   }
+
+  DLOGI("Active configuration changed to: %d", index);
 
   return ReconfigureDisplay();
 }
@@ -1047,9 +1056,14 @@ DisplayError DisplayBase::SetColorModeInternal(const std::string &color_mode,
   DLOGV_IF(kTagQDCM, "Color Mode Name = %s corresponding mode_id = %d", sde_display_mode->name,
            sde_display_mode->id);
   DisplayError error = kErrorNone;
-  uint32_t render_intent = 0;
+  int32_t render_intent = 0;
   if (!str_render_intent.empty()) {
     render_intent = std::stoi(str_render_intent);
+  }
+
+  if (render_intent < 0 || render_intent > MAX_EXTENDED_RENDER_INTENT) {
+    DLOGW("Invalid render intent %d for mode id = %d", render_intent, sde_display_mode->id);
+    return kErrorNotSupported;
   }
 
   error = color_mgr_->ColorMgrSetMode(sde_display_mode->id);
@@ -1247,6 +1261,8 @@ DisplayError DisplayBase::SetVSyncState(bool enable) {
     }
     if (error == kErrorNone) {
       vsync_enable_ = enable;
+    } else {
+      vsync_enable_pending_ = true;
     }
   }
   vsync_enable_pending_ = !enable ? false : vsync_enable_pending_;
@@ -2053,6 +2069,11 @@ DisplayError DisplayBase::HandlePendingPowerState(const shared_ptr<Fence> &retir
 
     if (pending_doze_) {
       state_ = kStateDoze;
+      DisplayError error = ReconfigureDisplay();
+      if (error != kErrorNone) {
+        return error;
+      }
+      event_handler_->Refresh();
     }
     if (pending_power_on_) {
       state_ = kStateOn;
@@ -2081,6 +2102,11 @@ bool DisplayBase::GameEnhanceSupported() {
     return color_mgr_->GameEnhanceSupported();
   }
   return false;
+}
+
+DisplayError DisplayBase::OnMinHdcpEncryptionLevelChange(uint32_t min_enc_level) {
+  lock_guard<recursive_mutex> obj(recursive_mutex_);
+  return hw_intf_->OnMinHdcpEncryptionLevelChange(min_enc_level);
 }
 
 }  // namespace sdm

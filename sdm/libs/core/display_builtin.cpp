@@ -229,6 +229,7 @@ DisplayError DisplayBuiltIn::Commit(LayerStack *layer_stack) {
   lock_guard<recursive_mutex> obj(recursive_mutex_);
   DisplayError error = kErrorNone;
   uint32_t app_layer_count = hw_layers_.info.app_layer_count;
+  HWDisplayMode panel_mode = hw_panel_info_.mode;
 
   DTRACE_SCOPED();
 
@@ -301,6 +302,10 @@ DisplayError DisplayBuiltIn::Commit(LayerStack *layer_stack) {
     ControlPartialUpdate(true /* enable */, &pending);
   }
 
+  if (panel_mode != hw_panel_info_.mode) {
+    UpdateDisplayModeParams();
+  }
+
   if (dpps_pu_nofiy_pending_) {
     dpps_pu_nofiy_pending_ = false;
     dpps_pu_lock_.Broadcast();
@@ -325,10 +330,22 @@ DisplayError DisplayBuiltIn::Commit(LayerStack *layer_stack) {
   return error;
 }
 
+void DisplayBuiltIn::UpdateDisplayModeParams() {
+  if (hw_panel_info_.mode == kModeVideo) {
+    uint32_t pending = 0;
+    ControlPartialUpdate(false /* enable */, &pending);
+  } else if (hw_panel_info_.mode == kModeCommand) {
+    // Flush idle timeout value currently set.
+    comp_manager_->SetIdleTimeoutMs(display_comp_ctx_, 0);
+    switch_to_cmd_ = true;
+  }
+}
+
 DisplayError DisplayBuiltIn::SetDisplayState(DisplayState state, bool teardown,
                                              shared_ptr<Fence> *release_fence) {
   lock_guard<recursive_mutex> obj(recursive_mutex_);
   DisplayError error = kErrorNone;
+  HWDisplayMode panel_mode = hw_panel_info_.mode;
 
   if ((state == kStateOn) && deferred_config_.IsDeferredState()) {
     SetDeferredFpsConfig();
@@ -339,12 +356,15 @@ DisplayError DisplayBuiltIn::SetDisplayState(DisplayState state, bool teardown,
     return error;
   }
 
+  if (hw_panel_info_.mode != panel_mode) {
+    UpdateDisplayModeParams();
+  }
+
   // Set vsync enable state to false, as driver disables vsync during display power off.
   if (state == kStateOff) {
     vsync_enable_ = false;
-  } else if (state == kStateOn && pendingActiveConfig != UINT_MAX) {
-    DisplayBase::SetActiveConfig(pendingActiveConfig);
-    pendingActiveConfig = UINT_MAX;
+  } else if (pendingActiveConfig != UINT_MAX) {
+    SetActiveConfig(pendingActiveConfig);
   }
 
   if (pending_doze_ || pending_power_on_) {
@@ -359,7 +379,7 @@ DisplayError DisplayBuiltIn::SetActiveConfig(uint32_t index) {
   DisplayState state;
 
   if (DisplayBase::GetDisplayState(&state) == kErrorNone) {
-    if (state != kStateOn) {
+    if (state != kStateOn || pending_doze_ || pending_power_on_) {
       pendingActiveConfig = index;
       return kErrorNone;
     }
@@ -392,7 +412,7 @@ DisplayError DisplayBuiltIn::SetDisplayMode(uint32_t mode) {
     HWDisplayMode hw_display_mode = static_cast<HWDisplayMode>(mode);
     uint32_t pending = 0;
 
-    if (!active_) {
+    if (!active_ && !pending_doze_ && !pending_power_on_) {
       DLOGW("Invalid display state = %d. Panel must be on.", state_);
       return kErrorNotSupported;
     }
@@ -722,7 +742,7 @@ DisplayError DisplayBuiltIn::DppsProcessOps(enum DppsOps op, void *payload, size
       enable = *(reinterpret_cast<bool *>(payload));
       dpps_info_.disable_pu_ = !enable;
       ControlPartialUpdate(enable, &pending);
-      event_handler_->HandleEvent(kInvalidateDisplay);
+      event_handler_->HandleEvent(kSyncInvalidateDisplay);
       event_handler_->Refresh();
       {
          lock_guard<recursive_mutex> obj(recursive_mutex_);
