@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2017-2019, The Linux Foundation. All rights reserved.
+* Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are
@@ -110,6 +110,8 @@ static InlineRotationVersion GetInRotVersion(sde_drm::InlineRotationVersion drm_
   switch (drm_version) {
     case sde_drm::InlineRotationVersion::kInlineRotationV1:
       return InlineRotationVersion::kInlineRotationV1;
+    case sde_drm::InlineRotationVersion::kInlineRotationV2:
+      return InlineRotationVersion::kInlineRotationV2;
     default:
       return kInlineRotationNone;
   }
@@ -229,6 +231,8 @@ DisplayError HWInfoDRM::GetHWResourceInfo(HWResourceInfo *hw_resource) {
     hw_resource->hw_dest_scalar_info.count = 0;
   }
 
+  DLOGI("Destination scaler %sfound. Block count = %d.", hw_resource->hw_dest_scalar_info.count ?
+        "": "disabled or not ", hw_resource->hw_dest_scalar_info.count);
   DLOGI("Max plane width = %d", hw_resource->max_pipe_width);
   DLOGI("Max cursor width = %d", hw_resource->max_cursor_size);
   DLOGI("Max plane upscale = %d", hw_resource->max_scale_up);
@@ -240,12 +244,12 @@ DisplayError HWInfoDRM::GetHWResourceInfo(HWResourceInfo *hw_resource) {
   DLOGI("Has UBWC = %d", hw_resource->has_ubwc);
   DLOGI("Has Micro Idle = %d", hw_resource->has_micro_idle);
   DLOGI("Has Concurrent Writeback = %d", hw_resource->has_concurrent_writeback);
-  DLOGI("Has Src Tonemap = %d", hw_resource->src_tone_map);
+  DLOGI("Has Src Tonemap = %lx", hw_resource->src_tone_map.to_ulong());
   DLOGI("Max Low Bw = %" PRIu64 "", hw_resource->dyn_bw_info.total_bw_limit[kBwVFEOn]);
-  DLOGI("Max High Bw = % " PRIu64 "", hw_resource->dyn_bw_info.total_bw_limit[kBwVFEOff]);
+  DLOGI("Max High Bw = %" PRIu64 "", hw_resource->dyn_bw_info.total_bw_limit[kBwVFEOff]);
   DLOGI("Max Pipe Bw = %" PRIu64 " KBps", hw_resource->dyn_bw_info.pipe_bw_limit[kBwVFEOn]);
   DLOGI("Max Pipe Bw High= %" PRIu64 " KBps", hw_resource->dyn_bw_info.pipe_bw_limit[kBwVFEOff]);
-  DLOGI("MaxSDEClock = % " PRIu64 " Hz", hw_resource->max_sde_clk);
+  DLOGI("MaxSDEClock = %d Hz", hw_resource->max_sde_clk);
   DLOGI("Clock Fudge Factor = %f", hw_resource->clk_fudge_factor);
   DLOGI("Prefill factors:");
   DLOGI("\tTiled_NV12 = %d", hw_resource->macrotile_nv12_factor);
@@ -261,7 +265,7 @@ DisplayError HWInfoDRM::GetHWResourceInfo(HWResourceInfo *hw_resource) {
 
   DLOGI("Has Support for multiple bw limits shown below");
   for (int index = 0; index < kBwModeMax; index++) {
-    DLOGI("Mode-index=%d  total_bw_limit=%d and pipe_bw_limit=%d", index,
+    DLOGI("Mode-index=%d  total_bw_limit=%" PRIu64 " and pipe_bw_limit=%" PRIu64, index,
           hw_resource->dyn_bw_info.total_bw_limit[index],
           hw_resource->dyn_bw_info.pipe_bw_limit[index]);
   }
@@ -342,6 +346,9 @@ void HWInfoDRM::GetSystemInfo(HWResourceInfo *hw_resource) {
   hw_resource->num_mnocports = info.num_mnocports ? info.num_mnocports : 2;
   hw_resource->mnoc_bus_width = info.mnoc_bus_width ? info.mnoc_bus_width : 32;
   hw_resource->use_baselayer_for_stage = info.use_baselayer_for_stage;
+  hw_resource->ubwc_version = info.ubwc_version;
+  // RC
+  hw_resource->rc_total_mem_size = info.rc_total_mem_size;
 }
 
 void HWInfoDRM::GetHWPlanesInfo(HWResourceInfo *hw_resource) {
@@ -530,7 +537,9 @@ void HWInfoDRM::GetWBInfo(HWResourceInfo *hw_resource) {
   // Fake register
   ret = drm_mgr_intf_->RegisterDisplay(sde_drm::DRMDisplayType::VIRTUAL, &token);
   if (ret) {
-    DLOGE("Failed registering display %d. Error: %d.", sde_drm::DRMDisplayType::VIRTUAL, ret);
+    if (ret != -ENODEV) {
+      DLOGE("Failed registering display %d. Error: %d.", sde_drm::DRMDisplayType::VIRTUAL, ret);
+    }
     return;
   }
 
@@ -832,7 +841,7 @@ DisplayError HWInfoDRM::GetDisplaysStatus(HWDisplaysInfo *hw_displays_info) {
         hw_info.display_type = kVirtual;
         break;
       default:
-        DLOGE("Unknown display type = %d on connector id %u.", iter.second.type,
+        DLOGW("Unknown display type = %d on connector id %u.", iter.second.type,
               hw_info.display_id);
         break;
     }
