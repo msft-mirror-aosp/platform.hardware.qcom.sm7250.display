@@ -164,6 +164,18 @@ DisplayError HWTVDRM::GetConfigIndex(char *mode, uint32_t *index) {
   return kErrorNone;
 }
 
+DisplayError HWTVDRM::Deinit() {
+  if (hw_panel_info_.hdr_enabled) {
+    memset(&hdr_metadata_, 0, sizeof(hdr_metadata_));
+    hdr_metadata_.hdr_supported = 1;
+    hdr_metadata_.hdr_state = HDR_DISABLE;
+    drm_atomic_intf_->Perform(DRMOps::CONNECTOR_SET_HDR_METADATA, token_.conn_id,
+                              &hdr_metadata_);
+  }
+
+  return HWDeviceDRM::Deinit();
+}
+
 DisplayError HWTVDRM::GetDefaultConfig(uint32_t *default_config) {
   bool found = false;
 
@@ -437,32 +449,6 @@ DisplayError HWTVDRM::PowerOn(const HWQosData &qos_data, shared_ptr<Fence> *rele
   }
 
   return HWDeviceDRM::PowerOn(qos_data, release_fence);
-}
-
-DisplayError HWTVDRM::OnMinHdcpEncryptionLevelChange(uint32_t min_enc_level) {
-  DisplayError error = kErrorNone;
-  int fd = -1;
-  char data[kMaxStringLength] = {'\0'};
-
-  snprintf(data, sizeof(data), "/sys/devices/virtual/hdcp/msm_hdcp/min_level_change");
-
-  fd = Sys::open_(data, O_WRONLY);
-  if (fd < 0) {
-    DLOGE("File '%s' could not be opened. errno = %d, desc = %s", data, errno, strerror(errno));
-    return kErrorHardware;
-  }
-
-  snprintf(data, sizeof(data), "%d", min_enc_level);
-
-  ssize_t err = Sys::pwrite_(fd, data, strlen(data), 0);
-  if (err <= 0) {
-    DLOGE("Write failed, Error = %s", strerror(errno));
-    error = kErrorHardware;
-  }
-
-  Sys::close_(fd);
-
-  return error;
 }
 
 }  // namespace sdm
