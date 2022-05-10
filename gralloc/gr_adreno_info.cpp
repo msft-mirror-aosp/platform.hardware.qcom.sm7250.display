@@ -77,6 +77,12 @@ AdrenoMemInfo::AdrenoMemInfo() {
   } else {
     ALOGE(" Failed to load libadreno_utils.so");
   }
+  char property[PROPERTY_VALUE_MAX];
+  property_get(DISABLE_UBWC_PROP, property, "0");
+  if (!(strncmp(property, "1", PROPERTY_VALUE_MAX)) ||
+      !(strncmp(property, "true", PROPERTY_VALUE_MAX))) {
+     gfx_ubwc_disable_ = true;
+  }
 }
 
 AdrenoMemInfo::~AdrenoMemInfo() {
@@ -86,7 +92,6 @@ AdrenoMemInfo::~AdrenoMemInfo() {
 }
 
 void AdrenoMemInfo::AdrenoSetProperties(gralloc::GrallocProperties props) {
-  gfx_ubwc_disable_ = props.ubwc_disable;
   gfx_ahardware_buffer_disable_ = props.ahardware_buffer_disable;
 }
 
@@ -194,6 +199,10 @@ ADRENOPIXELFORMAT AdrenoMemInfo::GetGpuPixelFormat(int hal_format) {
       return ADRENO_PIXELFORMAT_R5G5B5A1;
     case HAL_PIXEL_FORMAT_RGBA_4444:
       return ADRENO_PIXELFORMAT_R4G4B4A4;
+    case HAL_PIXEL_FORMAT_R_8:
+      return ADRENO_PIXELFORMAT_R8_UNORM;
+    case HAL_PIXEL_FORMAT_RG_88:
+      return ADRENO_PIXELFORMAT_R8G8_UNORM;
     case HAL_PIXEL_FORMAT_RGBA_1010102:
        return ADRENO_PIXELFORMAT_R10G10B10A2_UNORM;
     case HAL_PIXEL_FORMAT_RGBX_1010102:
@@ -204,6 +213,8 @@ ADRENOPIXELFORMAT AdrenoMemInfo::GetGpuPixelFormat(int hal_format) {
        return ADRENO_PIXELFORMAT_R16G16B16A16_FLOAT;
     case HAL_PIXEL_FORMAT_NV12_ENCODEABLE:
       return ADRENO_PIXELFORMAT_NV12;
+    case HAL_PIXEL_FORMAT_NV21_ENCODEABLE:
+      return ADRENO_PIXELFORMAT_NV21;
     case HAL_PIXEL_FORMAT_YCbCr_420_SP_VENUS:
     case HAL_PIXEL_FORMAT_YCbCr_420_SP_VENUS_UBWC:
       return ADRENO_PIXELFORMAT_NV12_EXT;

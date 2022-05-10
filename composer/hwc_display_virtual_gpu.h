@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2021, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -39,6 +39,7 @@ namespace sdm {
 enum class ColorConvertTaskCode : int32_t {
   kCodeGetInstance,
   kCodeBlit,
+  kCodeReset,
   kCodeDestroyInstance,
 };
 
@@ -66,6 +67,8 @@ class HWCDisplayVirtualGPU : public HWCDisplayVirtual,
   virtual int Deinit();
   virtual HWC2::Error Validate(uint32_t *out_num_types, uint32_t *out_num_requests);
   virtual HWC2::Error Present(shared_ptr<Fence> *out_retire_fence);
+  virtual HWC2::Error SetOutputBuffer(buffer_handle_t buf, shared_ptr<Fence> release_fence);
+  virtual bool FreezeScreen();
 
  private:
   // SyncTask methods.
@@ -73,7 +76,10 @@ class HWCDisplayVirtualGPU : public HWCDisplayVirtual,
               SyncTask<ColorConvertTaskCode>::TaskContext *task_context);
 
   SyncTask<ColorConvertTaskCode> color_convert_task_;
-  GLColorConvert *gl_color_convert_;
+  GLColorConvert *gl_color_convert_ = nullptr;
+
+  bool disable_animation_ = false;
+  bool animation_in_progress_ = false;
 };
 
 }  // namespace sdm
