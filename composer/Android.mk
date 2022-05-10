@@ -3,6 +3,8 @@ include $(LOCAL_PATH)/../common.mk
 include $(CLEAR_VARS)
 
 LOCAL_MODULE                  := vendor.qti.hardware.display.composer-service
+LOCAL_LICENSE_KINDS           := SPDX-license-identifier-Apache-2.0 SPDX-license-identifier-BSD legacy_not_a_contribution
+LOCAL_LICENSE_CONDITIONS      := by_exception_only not_allowed notice
 LOCAL_SANITIZE                := integer_overflow
 LOCAL_VENDOR_MODULE           := true
 LOCAL_MODULE_RELATIVE_PATH    := hw
@@ -10,7 +12,7 @@ LOCAL_MODULE_TAGS             := optional
 LOCAL_C_INCLUDES              := $(common_includes)
 LOCAL_C_INCLUDES              += $(kernel_includes)
 LOCAL_ADDITIONAL_DEPENDENCIES := $(common_deps)
-LOCAL_HEADER_LIBRARIES        := display_headers
+LOCAL_HEADER_LIBRARIES        := display_headers libThermal_headers
 
 LOCAL_CFLAGS                  := -Wno-missing-field-initializers -Wno-unused-parameter \
                                  -DLOG_TAG=\"SDM\" $(common_flags) -fcolor-diagnostics
@@ -33,9 +35,11 @@ LOCAL_SHARED_LIBRARIES        := libhistogram libbinder libhardware libutils lib
                                  android.hardware.graphics.allocator@2.0 \
                                  android.hardware.graphics.allocator@3.0 \
                                  libdisplayconfig.qti \
-                                 libdrm
+                                 libdrm libthermalclient
 
-LOCAL_SHARED_LIBRARIES        += hardware.google.light@1.0
+LOCAL_SHARED_LIBRARIES        += com.google.hardware.pixel.display-V1-ndk \
+                                 libbinder_ndk \
+                                 libbase
 
 LOCAL_SRC_FILES               := QtiComposer.cpp QtiComposerClient.cpp service.cpp \
                                  QtiComposerHandleImporter.cpp \
@@ -64,9 +68,20 @@ LOCAL_SRC_FILES               := QtiComposer.cpp QtiComposerClient.cpp service.c
                                  gl_color_convert.cpp \
                                  gl_color_convert_impl.cpp \
                                  gl_layer_stitch.cpp \
-                                 gl_layer_stitch_impl.cpp
+                                 gl_layer_stitch_impl.cpp \
+                                 pixel-display.cpp
 
 LOCAL_INIT_RC                 := vendor.qti.hardware.display.composer-service.rc
-LOCAL_VINTF_FRAGMENTS         := vendor.qti.hardware.display.composer-service.xml
+ifneq ($(TARGET_HAS_LOW_RAM),true)
+  ifeq ($(TARGET_BOARD_PLATFORM)$(TARGET_BOARD_SUFFIX),bengal_32)
+    LOCAL_VINTF_FRAGMENTS         := vendor.qti.hardware.display.composer-service-32bit.xml
+  else
+    LOCAL_VINTF_FRAGMENTS         := vendor.qti.hardware.display.composer-service.xml
+  endif
+else
+LOCAL_VINTF_FRAGMENTS         := vendor.qti.hardware.display.composer-service-low-ram.xml
+endif
+
+LOCAL_VINTF_FRAGMENTS         += pixel-display-default.xml
 
 include $(BUILD_EXECUTABLE)
