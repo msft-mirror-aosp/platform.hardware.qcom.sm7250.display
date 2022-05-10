@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014-2021, The Linux Foundation. All rights reserved.
  * Not a Contribution.
  *
  * Copyright 2015 The Android Open Source Project
@@ -205,6 +205,99 @@ bool GetSDMColorSpace(const int32_t &dataspace, ColorMetaData *color_metadata) {
   return valid;
 }
 
+DisplayError ColorMetadataToDataspace(ColorMetaData color_metadata, Dataspace *dataspace) {
+  Dataspace primaries, transfer, range = Dataspace::UNKNOWN;
+
+  switch (color_metadata.colorPrimaries) {
+    case ColorPrimaries_BT709_5:
+      primaries = Dataspace::STANDARD_BT709;
+      break;
+    case ColorPrimaries_BT470_6M:
+      primaries = Dataspace::STANDARD_BT470M;
+      break;
+    case ColorPrimaries_BT601_6_625:
+      primaries = Dataspace::STANDARD_BT601_625;
+      break;
+    case ColorPrimaries_BT601_6_525:
+      primaries = Dataspace::STANDARD_BT601_525;
+      break;
+    case ColorPrimaries_GenericFilm:
+      primaries = Dataspace::STANDARD_FILM;
+      break;
+    case ColorPrimaries_BT2020:
+      primaries = Dataspace::STANDARD_BT2020;
+      break;
+    case ColorPrimaries_AdobeRGB:
+      primaries = Dataspace::STANDARD_ADOBE_RGB;
+      break;
+    case ColorPrimaries_DCIP3:
+      primaries = Dataspace::STANDARD_DCI_P3;
+      break;
+    default:
+      return kErrorNotSupported;
+      /*
+       ColorPrimaries_SMPTE_240M;
+       ColorPrimaries_SMPTE_ST428;
+       ColorPrimaries_EBU3213;
+      */
+  }
+
+  switch (color_metadata.transfer) {
+    case Transfer_sRGB:
+      transfer = Dataspace::TRANSFER_SRGB;
+      break;
+    case Transfer_Gamma2_2:
+      transfer = Dataspace::TRANSFER_GAMMA2_2;
+      break;
+    case Transfer_Gamma2_8:
+      transfer = Dataspace::TRANSFER_GAMMA2_8;
+      break;
+    case Transfer_SMPTE_170M:
+      transfer = Dataspace::TRANSFER_SMPTE_170M;
+      break;
+    case Transfer_Linear:
+      transfer = Dataspace::TRANSFER_LINEAR;
+      break;
+    case Transfer_SMPTE_ST2084:
+      transfer = Dataspace::TRANSFER_ST2084;
+      break;
+    case Transfer_HLG:
+      transfer = Dataspace::TRANSFER_HLG;
+      break;
+    default:
+      return kErrorNotSupported;
+      /*
+      Transfer_SMPTE_240M
+      Transfer_Log
+      Transfer_Log_Sqrt
+      Transfer_XvYCC
+      Transfer_BT1361
+      Transfer_sYCC
+      Transfer_BT2020_2_1
+      Transfer_BT2020_2_2
+      Transfer_SMPTE_ST2084
+      Transfer_ST_428
+      */
+  }
+
+  switch (color_metadata.range) {
+    case Range_Full:
+      range = Dataspace::RANGE_FULL;
+      break;
+    case Range_Limited:
+      range = Dataspace::RANGE_LIMITED;
+      break;
+    case Range_Extended:
+      range = Dataspace::RANGE_EXTENDED;
+      break;
+    default:
+      return kErrorNotSupported;
+  }
+
+  *dataspace = (Dataspace)((uint32_t)primaries | (uint32_t)transfer | (uint32_t)range);
+  return kErrorNone;
+}
+
 // Layer operations
 HWCLayer::HWCLayer(hwc2_display_t display_id, HWCBufferAllocator *buf_allocator)
   : id_(next_id_++), display_id_(display_id), buffer_allocator_(buf_allocator) {
@@ -231,8 +324,8 @@ HWC2::Error HWCLayer::SetLayerBuffer(buffer_handle_t buffer, shared_ptr<Fence> a
   if (!buffer) {
     if (client_requested_ == HWC2::Composition::Device ||
         client_requested_ == HWC2::Composition::Cursor) {
-      DLOGW("Invalid buffer handle: %p on layer: %d client requested comp type %d", buffer, id_,
-            client_requested_);
+      DLOGW("Invalid buffer handle: %p on layer: %" PRIu64 " client requested comp type %d", buffer,
+            id_, client_requested_);
       return HWC2::Error::BadParameter;
     } else {
       return HWC2::Error::None;
@@ -761,6 +854,7 @@ LayerBufferFormat HWCLayer::GetSDMFormat(const int32_t &source, const int flags)
       format = kFormatBGR565;
       break;
     case HAL_PIXEL_FORMAT_NV12_ENCODEABLE:
+    case HAL_PIXEL_FORMAT_NV12_LINEAR_FLEX:
     case HAL_PIXEL_FORMAT_YCbCr_420_SP_VENUS:
       format = kFormatYCbCr420SemiPlanarVenus;
       break;
@@ -975,7 +1069,7 @@ void HWCLayer::ValidateAndSetCSC(const private_handle_t *handle) {
         layer_buffer->color_metadata.matrixCoefficients = new_metadata.matrixCoefficients;
         layer_->update_mask.set(kMetadataUpdate);
       }
-      DLOGV_IF(kTagClient, "Layer id = %lld ColorVolEnabled = %d ContentLightLevelEnabled = %d "
+      DLOGV_IF(kTagClient, "Layer id = %" PRIu64 " ColorVolEnabled = %d ContentLightLevelEnabled = %d "
                "cRIEnabled = %d Dynamic Metadata valid = %d size = %d", id_,
                new_metadata.masteringDisplayInfo.colorVolumeSEIEnabled,
                new_metadata.contentLightLevel.lightLevelSEIEnabled,
@@ -1091,6 +1185,10 @@ bool HWCLayer::IsScalingPresent() {
   uint32_t src_height = static_cast<uint32_t>(layer_->src_rect.bottom - layer_->src_rect.top);
   uint32_t dst_width  = static_cast<uint32_t>(layer_->dst_rect.right - layer_->dst_rect.left);
   uint32_t dst_height = static_cast<uint32_t>(layer_->dst_rect.bottom - layer_->dst_rect.top);
+
+  if ((layer_->transform.rotation == 90.0) || (layer_->transform.rotation == 270.0)) {
+    std::swap(src_width, src_height);
+  }
 
   return ((src_width != dst_width) || (dst_height != src_height));
 }
