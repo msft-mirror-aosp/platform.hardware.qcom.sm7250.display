@@ -394,6 +394,8 @@ void DRMDppsManagerImp::CommitDppsFeatures(drmModeAtomicReq *req, const DRMDispl
         }
         if (ret != -ENODEV)
           it = dpps_dirty_event_.erase(it);
+        else
+          it++;
       } else {
         it++;
       }
@@ -461,7 +463,7 @@ int DRMDppsManagerImp::InitLtmBuffers(struct DRMDppsFeatureInfo *info) {
   }
 
   if (!info->payload || info->payload_size != sizeof(struct DRMDppsLtmBuffers)) {
-    DRM_LOGE("Invalid payload %p size %d expected %d", info->payload, info->payload_size,
+    DRM_LOGE("Invalid payload %p size %d expected %zu", info->payload, info->payload_size,
        sizeof(struct DRMDppsLtmBuffers));
     return -EINVAL;
   }
