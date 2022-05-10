@@ -1,5 +1,5 @@
 /*
-* Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.
+* Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
 *
 * Redistribution and use in source and binary forms, with or without
 * modification, are permitted provided that the following conditions are
@@ -97,6 +97,7 @@
 #define DROP_SKEWED_VSYNC                    DISPLAY_PROP("drop_skewed_vsync")
 #define DISABLE_FAST_PATH                    DISPLAY_PROP("disable_fast_path")
 #define DISABLE_SYSTEM_LOAD_CHECK            DISPLAY_PROP("disable_system_load_check")
+#define DISABLE_IDLE_SCALING_LAYERS          DISPLAY_PROP("disable_idle_scaling_layers")
 // Disable microidle condition
 #define DISABLE_SINGLE_LM_SPLIT_PROP         DISPLAY_PROP("disable_single_lm_split")
 // Enable posted start dynamic
@@ -117,6 +118,20 @@
 #define CAMERA_NOC_EFFICIENCY_FACTOR         DISPLAY_PROP("camera_noc_efficiency_factor")
 #define ENABLE_HISTOGRAM_INTR                DISPLAY_PROP("enable_hist_intr")
 #define DEFER_FPS_FRAME_COUNT                DISPLAY_PROP("defer_fps_frame_count")
+#define ENABLE_BW_LIMITS                     DISPLAY_PROP("enable_bw_limits")
+#define DISABLE_ROTATOR_PRE_DOWNSCALER_PROP  DISPLAY_PROP("disable_pre_downscaler")
+#define DISABLE_INLINE_ROTATOR_UI_PROP       DISPLAY_PROP("disable_inline_rotator_ui")
+#define ENABLE_POMS_DURING_DOZE              DISPLAY_PROP("enable_poms_during_doze")
+// RC
+#define ENABLE_ROUNDED_CORNER                DISPLAY_PROP("enable_rounded_corner")
+#define DISABLE_ROUNDED_CORNER_THREAD        DISPLAY_PROP("disable_rounded_corner_thread")
+#define DISABLE_DYNAMIC_FPS                  DISPLAY_PROP("disable_dynamic_fps")
+#define ENHANCE_IDLE_TIME                    DISPLAY_PROP("enhance_idle_time")
+#define ENABLE_QSYNC_IDLE                    DISPLAY_PROP("enable_qsync_idle")
+
+// PERF hint properties
+#define ENABLE_PERF_HINT_LARGE_COMP_CYCLE    DISPLAY_PROP("enable_perf_hint_large_comp_cycle")
+#define ENABLE_HDR10_GPU_TARGET              DISPLAY_PROP("enable_hdr10_gpu_target")
 
 // Add all vendor.display properties above
 
@@ -129,7 +144,10 @@
 // Add all persist.vendor.display.properties above
 
 #define ZERO_SWAP_INTERVAL                   "vendor.debug.egl.swapinterval"
-
+#define WINDOW_RECT_PROP                     DISPLAY_PROP("window_rect")
+#define DISABLE_IDLE_TIME_HDR                DISPLAY_PROP("disable_idle_time_hdr")
+#define DISABLE_IDLE_TIME_VIDEO              DISPLAY_PROP("disable_idle_time_video")
+#define LBE_SUPPORTED                        DISPLAY_PROP("lbe.supported")
 // Add all other.properties above
 // End of property
 #endif  // __DISPLAY_PROPERTIES_H__
