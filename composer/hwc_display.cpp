@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014-2021, The Linux Foundation. All rights reserved.
  * Not a Contribution.
  *
  * Copyright 2015 The Android Open Source Project
@@ -53,7 +53,6 @@
 namespace sdm {
 
 uint32_t HWCDisplay::throttling_refresh_rate_ = 60;
-constexpr uint32_t kVsyncTimeDriftNs = 1000000;
 
 bool NeedsToneMap(const LayerStack &layer_stack) {
   for (Layer *layer : layer_stack.layers) {
@@ -65,7 +64,7 @@ bool NeedsToneMap(const LayerStack &layer_stack) {
 }
 
 bool IsTimeAfterOrEqualVsyncTime(int64_t time, int64_t vsync_time) {
-  return ((vsync_time != INT64_MAX) && ((time - (vsync_time - kVsyncTimeDriftNs)) >= 0));
+  return ((vsync_time != INT64_MAX) && ((time - vsync_time) >= 0));
 }
 
 HWCColorMode::HWCColorMode(DisplayInterface *display_intf) : display_intf_(display_intf) {}
@@ -206,6 +205,13 @@ HWC2::Error HWCColorMode::ApplyCurrentColorModeWithRenderIntent(bool hdr_present
       // fall back to display_p3/display_bt2020 SDR mode if there is no HDR mode
       mode_string = color_mode_map_[current_color_mode_][current_render_intent_][kSdrType];
     }
+
+    if (mode_string.empty() &&
+       (current_color_mode_ == ColorMode::BT2100_PQ) && (curr_dynamic_range_ == kSdrType)) {
+      // fallback to hdr mode.
+      mode_string = color_mode_map_[current_color_mode_][current_render_intent_][kHdrType];
+      DLOGI("fall back to hdr mode for ColorMode::BT2100_PQ kSdrType");
+    }
   }
 
   auto error = SetPreferredColorModeInternal(mode_string, false, NULL, NULL);
@@ -241,7 +247,7 @@ HWC2::Error HWCColorMode::SetPreferredColorModeInternal(const std::string &mode_
     std::string color_gamut_string, dynamic_range_string;
     error = display_intf_->GetColorModeAttr(mode_string, &attr);
     if (error) {
-      DLOGE("Failed to get mode attributes for mode %d", mode_string.c_str());
+      DLOGE("Failed to get mode attributes for mode %s", mode_string.c_str());
       return HWC2::Error::BadParameter;
     }
 
@@ -513,6 +519,16 @@ int HWCDisplay::Init() {
     return -EINVAL;
   }
 
+  bool is_primary_ = display_intf_->IsPrimaryDisplay();
+  if (is_primary_) {
+    int value = 0;
+    HWCDebugHandler::Get()->GetProperty(ENABLE_POMS_DURING_DOZE, &value);
+    enable_poms_during_doze_ = (value == 1);
+    if (enable_poms_during_doze_) {
+      DLOGI("Enable POMS during Doze mode %" PRIu64 , id_);
+    }
+  }
+
   UpdateConfigs();
 
   tone_mapper_ = new HWCToneMapper(buffer_allocator_);
@@ -536,7 +552,7 @@ int HWCDisplay::Init() {
 
   SetCurrentPanelGammaSource(kGammaCalibration);
 
-  DLOGI("Display created with id: %d, game_supported_: %d", id_, game_supported_);
+  DLOGI("Display created with id: %" PRIu64 ", game_supported_: %d", id_, game_supported_);
 
   return 0;
 }
@@ -552,11 +568,18 @@ void HWCDisplay::UpdateConfigs() {
     DisplayConfigVariableInfo info = {};
     GetDisplayAttributesForConfig(INT(i), &info);
     bool config_exists = false;
+
+    if (!smart_panel_config_ && info.smart_panel) {
+      smart_panel_config_ = true;
+    }
+
     for (auto &config : variable_config_map_) {
       if (config.second == info) {
-        config_exists = true;
-        hwc_config_map_.at(i) = config.first;
-        break;
+        if (enable_poms_during_doze_ || (config.second.smart_panel == info.smart_panel)) {
+          config_exists = true;
+          hwc_config_map_.at(i) = config.first;
+          break;
+        }
       }
     }
 
@@ -566,9 +589,15 @@ void HWCDisplay::UpdateConfigs() {
     }
   }
 
+  if (num_configs_ != 0) {
+    hwc2_config_t active_config = hwc_config_map_.at(0);
+    GetActiveConfig(&active_config);
+    SetActiveConfigIndex(active_config);
+  }
+
   // Update num config count.
   num_configs_ = UINT32(variable_config_map_.size());
-  DLOGI("num_configs = %d", num_configs_);
+  DLOGI("num_configs = %d smart_panel_config_ = %d", num_configs_, smart_panel_config_);
 }
 
 int HWCDisplay::Deinit() {
@@ -677,6 +706,10 @@ void HWCDisplay::BuildLayerStack() {
       layer->flags.skip = true;
     }
 
+    if (hwc_layer->IsColorTransformSet()) {
+      layer->flags.skip = true;
+    }
+
     // set default composition as GPU for SDM
     layer->composition = kCompositionGPU;
 
@@ -711,6 +744,10 @@ void HWCDisplay::BuildLayerStack() {
       is_secure = true;
     }
 
+    if (IS_RGB_FORMAT(layer->input_buffer.format) && hwc_layer->IsScalingPresent()) {
+      layer_stack_.flags.scaling_rgb_layer_present = true;
+    }
+
     if (hwc_layer->IsSingleBuffered() &&
        !(hwc_layer->IsRotationPresent() || hwc_layer->IsScalingPresent())) {
       layer->flags.single_buffer = true;
@@ -731,8 +768,14 @@ void HWCDisplay::BuildLayerStack() {
       hdr_largest_layer_px_ = std::max(hdr_largest_layer_px_, hdr_layer_area);
     }
 
+    if (game_supported_ && (hwc_layer->GetType() == kLayerGame)) {
+      layer->flags.is_game = true;
+      layer->input_buffer.flags.game = true;
+    }
+
     if (hwc_layer->IsNonIntegralSourceCrop() && !is_secure && !hdr_layer &&
-        !layer->flags.single_buffer && !layer->flags.solid_fill && !is_video) {
+        !layer->flags.single_buffer && !layer->flags.solid_fill && !is_video &&
+        !layer->flags.is_game) {
       layer->flags.skip = true;
     }
 
@@ -794,11 +837,6 @@ void HWCDisplay::BuildLayerStack() {
       layer->update_mask.set(kClientCompRequest);
     }
 
-    if (game_supported_ && (hwc_layer->GetType() == kLayerGame)) {
-      layer->flags.is_game = true;
-      layer->input_buffer.flags.game = true;
-    }
-
     layer_stack_.layers.push_back(layer);
   }
 
@@ -819,14 +857,6 @@ void HWCDisplay::BuildLayerStack() {
   int32_t client_target_dataspace = GetDataspaceFromColorMode(GetCurrentColorMode());
   SetClientTargetDataSpace(client_target_dataspace);
   layer_stack_.layers.push_back(sdm_client_target);
-
-  // fall back frame composition to GPU when client target is 10bit
-  // TODO(user): clarify the behaviour from Client(SF) and SDM Extn -
-  // when handling 10bit FBT, as it would affect blending
-  if (Is10BitFormat(sdm_client_target->input_buffer.format)) {
-    // Must fall back to client composition
-    MarkLayersForClientComposition();
-  }
 }
 
 void HWCDisplay::BuildSolidFillStack() {
@@ -884,7 +914,7 @@ HWC2::Error HWCDisplay::SetLayerZOrder(hwc2_layer_t layer_id, uint32_t z) {
 }
 
 HWC2::Error HWCDisplay::SetVsyncEnabled(HWC2::Vsync enabled) {
-  DLOGV("Display ID: %d enabled: %s", id_, to_string(enabled).c_str());
+  DLOGV("Display ID: %" PRIu64 " enabled: %s", id_, to_string(enabled).c_str());
   ATRACE_INT("SetVsyncState ", enabled == HWC2::Vsync::Enable ? 1 : 0);
   DisplayError error = kErrorNone;
 
@@ -937,7 +967,7 @@ void HWCDisplay::PostPowerMode() {
 }
 
 HWC2::Error HWCDisplay::SetPowerMode(HWC2::PowerMode mode, bool teardown) {
-  DLOGV("display = %d, mode = %s", id_, to_string(mode).c_str());
+  DLOGV("display = %" PRIu64 ", mode = %s", id_, to_string(mode).c_str());
   DisplayState state = kStateOff;
   bool flush_on_error = flush_on_error_;
 
@@ -956,9 +986,11 @@ HWC2::Error HWCDisplay::SetPowerMode(HWC2::PowerMode mode, bool teardown) {
       }
       break;
     case HWC2::PowerMode::On:
+      RestoreColorTransform();
       state = kStateOn;
       break;
     case HWC2::PowerMode::Doze:
+      RestoreColorTransform();
       state = kStateDoze;
       break;
     case HWC2::PowerMode::DozeSuspend:
@@ -1070,15 +1102,23 @@ HWC2::Error HWCDisplay::GetDisplayAttribute(hwc2_config_t config, HwcAttribute a
   }
 
   DisplayConfigVariableInfo variable_config = variable_config_map_.at(config);
+
+  uint32_t x_pixels = variable_config.x_pixels - UINT32(window_rect_.right + window_rect_.left);
+  uint32_t y_pixels = variable_config.y_pixels - UINT32(window_rect_.bottom + window_rect_.top);
+  if (x_pixels <= 0 || y_pixels <= 0) {
+    DLOGE("window rects are not within the supported range");
+    return HWC2::Error::BadDisplay;
+  }
+
   switch (attribute) {
     case HwcAttribute::VSYNC_PERIOD:
       *out_value = INT32(variable_config.vsync_period_ns);
       break;
     case HwcAttribute::WIDTH:
-      *out_value = INT32(variable_config.x_pixels);
+      *out_value = INT32(x_pixels);
       break;
     case HwcAttribute::HEIGHT:
-      *out_value = INT32(variable_config.y_pixels);
+      *out_value = INT32(y_pixels);
       break;
     case HwcAttribute::DPI_X:
       *out_value = INT32(variable_config.x_dpi * 1000.0f);
@@ -1198,33 +1238,60 @@ HWC2::Error HWCDisplay::SetClientTarget(buffer_handle_t target, shared_ptr<Fence
   }
 
   if (acquire_fence == nullptr) {
-    DLOGW("acquire_fence is zero");
-    return HWC2::Error::BadParameter;
+    DLOGV_IF(kTagClient, "Re-using cached buffer");
   }
 
   Layer *sdm_layer = client_target_->GetSDMLayer();
   sdm_layer->frame_rate = std::min(current_refresh_rate_, HWCDisplay::GetThrottlingRefreshRate());
   client_target_->SetLayerSurfaceDamage(damage);
-  int translated_dataspace = TranslateFromLegacyDataspace(dataspace);
-  if (client_target_->GetLayerDataspace() != translated_dataspace) {
-    DLOGW("New Dataspace = %d not matching Dataspace from color mode = %d",
-           translated_dataspace, client_target_->GetLayerDataspace());
-    return HWC2::Error::BadParameter;
-  }
   client_target_->SetLayerBuffer(target, acquire_fence);
+  client_target_->SetLayerDataspace(dataspace);
+  client_target_handle_ = target;
+  client_acquire_fence_ = acquire_fence;
+  client_dataspace_     = dataspace;
+  client_damage_region_ = damage;
+
+  return HWC2::Error::None;
+}
+
+HWC2::Error HWCDisplay::GetClientTarget(buffer_handle_t target, shared_ptr<Fence> acquire_fence,
+                                        int32_t dataspace, hwc_region_t damage) {
+  target        = client_target_handle_;
+  acquire_fence = client_acquire_fence_;
+  dataspace     = client_dataspace_;
+  damage        = client_damage_region_;
 
   return HWC2::Error::None;
 }
 
 HWC2::Error HWCDisplay::SetActiveConfig(hwc2_config_t config) {
   DTRACE_SCOPED();
-
   hwc2_config_t current_config = 0;
   GetActiveConfig(&current_config);
   if (current_config == config) {
     return HWC2::Error::None;
   }
+
+  // DRM driver expects DRM_PREFERRED_MODE to be set as part of first commit.
+  if (!IsFirstCommitDone()) {
+    // Store client's config.
+    // Set this as part of post commit.
+    pending_first_commit_config_ = true;
+    pending_first_commit_config_index_ = config;
+    DLOGI("Defer config change to %d until first commit", UINT32(config));
+    return HWC2::Error::None;
+  } else if (pending_first_commit_config_) {
+    // Config override request from client.
+    // Honour latest request.
+    pending_first_commit_config_ = false;
+  }
+
   DLOGI("Active configuration changed to: %d", config);
+
+  // Cache refresh rate set by client.
+  DisplayConfigVariableInfo info = {};
+  GetDisplayAttributesForConfig(INT(config), &info);
+  active_refresh_rate_ = info.fps;
 
   // Store config index to be applied upon refresh.
   pending_config_ = true;
@@ -1304,7 +1371,8 @@ DisplayError HWCDisplay::HandleEvent(DisplayEvent event) {
       validated_ = false;
       break;
     }
-    case kInvalidateDisplay:
+    case kSyncInvalidateDisplay:
+    case kIdlePowerCollapse:
     case kThermalEvent: {
       SEQUENCE_WAIT_SCOPE_LOCK(HWCSession::locker_[id_]);
       validated_ = false;
@@ -1324,11 +1392,15 @@ DisplayError HWCDisplay::HandleEvent(DisplayEvent event) {
       if (event_handler_) {
         event_handler_->DisplayPowerReset();
       } else {
-        DLOGW("Cannot execute DisplayPowerReset (client_id = %d), event_handler_ is nullptr",
+        DLOGW("Cannot execute DisplayPowerReset (client_id = %" PRIu64 "), event_handler_ is null",
               id_);
       }
     } break;
-    case kIdlePowerCollapse:
+    case kInvalidateDisplay:
+      validated_ = false;
+      break;
+    case kPostIdleTimeout:
+      display_idle_ = true;
       break;
     default:
       DLOGW("Unknown event: %d", event);
@@ -1346,6 +1418,7 @@ HWC2::Error HWCDisplay::PrepareLayerStack(uint32_t *out_num_types, uint32_t *out
   layer_changes_.clear();
   layer_requests_.clear();
   has_client_composition_ = false;
+  display_idle_ = false;
 
   DTRACE_SCOPED();
   if (shutdown_pending_) {
@@ -1581,7 +1654,7 @@ HWC2::Error HWCDisplay::CommitLayerStack(void) {
   DTRACE_SCOPED();
 
   if (!validated_) {
-    DLOGV_IF(kTagClient, "Display %d is not validated", id_);
+    DLOGV_IF(kTagClient, "Display %" PRIu64 "is not validated", id_);
     return HWC2::Error::NotValidated;
   }
 
@@ -1590,7 +1663,7 @@ HWC2::Error HWCDisplay::CommitLayerStack(void) {
   }
 
   if (skip_commit_) {
-    DLOGV_IF(kTagClient, "Skipping Refresh on display %d", id_);
+    DLOGV_IF(kTagClient, "Skipping Refresh on display %" PRIu64 , id_);
     return HWC2::Error::None;
   }
 
@@ -1681,6 +1754,7 @@ HWC2::Error HWCDisplay::PostCommitLayerStack(shared_ptr<Fence> *out_retire_fence
     }
 
     layer->request.flags = {};
+    layer_buffer->acquire_fence = nullptr;
   }
 
   client_target_->GetSDMLayer()->request.flags = {};
@@ -1699,10 +1773,17 @@ HWC2::Error HWCDisplay::PostCommitLayerStack(shared_ptr<Fence> *out_retire_fence
   flush_ = false;
   skip_commit_ = false;
 
+  // Handle pending config changes.
+  if (pending_first_commit_config_) {
+    DLOGI("Changing active config to %d", UINT32(pending_first_commit_config_));
+    pending_first_commit_config_ = false;
+    SetActiveConfig(pending_first_commit_config_index_);
+  }
+
   return status;
 }
 
-void HWCDisplay::SetIdleTimeoutMs(uint32_t timeout_ms) {
+void HWCDisplay::SetIdleTimeoutMs(uint32_t timeout_ms, uint32_t inactive_ms) {
   return;
 }
 
@@ -1747,8 +1828,8 @@ void HWCDisplay::DumpInputBuffers() {
         reinterpret_cast<const private_handle_t *>(layer->input_buffer.buffer_id);
     Fence::Wait(layer->input_buffer.acquire_fence);
 
-    DLOGI("Dump layer[%d] of %d pvt_handle %x pvt_handle->base %x", i, layer_stack_.layers.size(),
-          pvt_handle, pvt_handle? pvt_handle->base : 0);
+    DLOGI("Dump layer[%d] of %d pvt_handle %p pvt_handle->base %" PRIx64, i,
+          UINT32(layer_stack_.layers.size()), pvt_handle, pvt_handle? pvt_handle->base : 0);
 
     if (!pvt_handle) {
       DLOGE("Buffer handle is null");
@@ -1866,6 +1947,19 @@ int HWCDisplay::SetFrameBufferConfig(uint32_t x_pixels, uint32_t y_pixels) {
     return -EINVAL;
   }
 
+  // Reduce the src_rect and dst_rect as per FBT config.
+  // SF sending reduced FBT but here the src_rect is equal to mixer which is
+  // higher than allocated buffer of FBT.
+  if (windowed_display_) {
+    x_pixels -= UINT32(window_rect_.right + window_rect_.left);
+    y_pixels -= UINT32(window_rect_.bottom + window_rect_.top);
+  }
+
+  if (x_pixels <= 0 || y_pixels <= 0) {
+    DLOGE("window rects are not within the supported range");
+    return -EINVAL;
+  }
+
   // Create rects to represent the new source and destination crops
   LayerRect crop = LayerRect(0, 0, FLOAT(x_pixels), FLOAT(y_pixels));
   hwc_rect_t scaled_display_frame = {0, 0, INT(x_pixels), INT(y_pixels)};
@@ -1887,6 +1981,10 @@ int HWCDisplay::SetFrameBufferResolution(uint32_t x_pixels, uint32_t y_pixels) {
     return error;
   }
 
+  if (windowed_display_) {
+    x_pixels -= UINT32(window_rect_.right + window_rect_.left);
+    y_pixels -= UINT32(window_rect_.bottom + window_rect_.top);
+  }
   auto client_target_layer = client_target_->GetSDMLayer();
 
   int aligned_width;
@@ -2123,14 +2221,14 @@ int HWCDisplay::GetVisibleDisplayRect(hwc_rect_t *visible_rect) {
   visible_rect->top = INT(display_rect_.top);
   visible_rect->right = INT(display_rect_.right);
   visible_rect->bottom = INT(display_rect_.bottom);
-  DLOGI("Dpy = %d Visible Display Rect(%d %d %d %d)", visible_rect->left, visible_rect->top,
+  DLOGI("Visible Display Rect(%d %d %d %d)", visible_rect->left, visible_rect->top,
         visible_rect->right, visible_rect->bottom);
 
   return 0;
 }
 
 int HWCDisplay::HandleSecureSession(const std::bitset<kSecureMax> &secure_sessions,
-                                    bool *power_on_pending) {
+                                    bool *power_on_pending, bool is_active_secure_display) {
   if (!power_on_pending) {
     return -EINVAL;
   }
@@ -2143,12 +2241,12 @@ int HWCDisplay::HandleSecureSession(const std::bitset<kSecureMax> &secure_sessio
         DLOGE("SetPowerMode failed. Error = %d", error);
       }
     } else {
-      *power_on_pending = true;
+      *power_on_pending = (pending_power_mode_ != HWC2::PowerMode::Off) ? true : false;
     }
 
-    DLOGI("SecureDisplay state changed from %d to %d for display %d-%d",
+    DLOGI("SecureDisplay state changed from %d to %d for display %" PRId64 " %d-%d",
           active_secure_sessions_.test(kSecureDisplay), secure_sessions.test(kSecureDisplay),
-          id_, type_);
+          id_, sdm_id_, type_);
   }
   active_secure_sessions_ = secure_sessions;
   return 0;
@@ -2179,8 +2277,13 @@ int HWCDisplay::SetActiveDisplayConfig(uint32_t config) {
   }
 
   validated_ = false;
-  display_intf_->SetActiveConfig(config);
+  DisplayError error = display_intf_->SetActiveConfig(config);
+  if (error != kErrorNone) {
+    DLOGE("Failed to set %d config! Error: %d", config, error);
+    return -EINVAL;
+  }
 
+  SetActiveConfigIndex(config);
   return 0;
 }
 
@@ -2316,14 +2419,14 @@ bool HWCDisplay::CanSkipValidate() {
   for (auto hwc_layer : layer_set_) {
     Layer *layer = hwc_layer->GetSDMLayer();
     if (hwc_layer->NeedsValidation()) {
-      DLOGV_IF(kTagClient, "hwc_layer[%d] needs validation. Returning false.",
+      DLOGV_IF(kTagClient, "hwc_layer[%" PRIu64 "] needs validation. Returning false.",
                hwc_layer->GetId());
       return false;
     }
 
     // Do not allow Skip Validate, if any layer needs GPU Composition.
     if (layer->composition == kCompositionGPU || layer->composition == kCompositionNone) {
-      DLOGV_IF(kTagClient, "hwc_layer[%d] is %s. Returning false.", hwc_layer->GetId(),
+      DLOGV_IF(kTagClient, "hwc_layer[%" PRIu64 "] is %s. Returning false.", hwc_layer->GetId(),
                (layer->composition == kCompositionGPU) ? "GPU composed": "Dropped");
       return false;
     }
@@ -2495,6 +2598,8 @@ void HWCDisplay::UpdateActiveConfig() {
   DisplayError error = display_intf_->SetActiveConfig(pending_config_index_);
   if (error != kErrorNone) {
     DLOGI("Failed to set %d config", INT(pending_config_index_));
+  } else {
+    SetActiveConfigIndex(pending_config_index_);
   }
 
   // Reset pending config.
@@ -2561,7 +2666,7 @@ void HWCDisplay::ProcessActiveConfigChange() {
 HWC2::Error HWCDisplay::GetVsyncPeriodByActiveConfig(VsyncPeriodNanos *vsync_period) {
   hwc2_config_t active_config;
 
-  auto error = GetActiveConfig(&active_config);
+  auto error = GetCachedActiveConfig(&active_config);
   if (error != HWC2::Error::None) {
     DLOGE("Failed to get active config!");
     return error;
@@ -2675,7 +2780,7 @@ bool HWCDisplay::IsSameGroup(hwc2_config_t config_id1, hwc2_config_t config_id2)
 
 bool HWCDisplay::AllowSeamless(hwc2_config_t config) {
   hwc2_config_t active_config;
-  auto error = GetActiveConfig(&active_config);
+  auto error = GetCachedActiveConfig(&active_config);
   if (error != HWC2::Error::None) {
     DLOGE("Failed to get active config!");
     return false;
@@ -2700,7 +2805,71 @@ HWC2::Error HWCDisplay::SubmitDisplayConfig(hwc2_config_t config) {
   }
 
   validated_ = false;
-  DLOGI("Active configuration changed to: %d", config);
+  SetActiveConfigIndex(config);
+
+  return HWC2::Error::None;
+}
+
+HWC2::Error HWCDisplay::GetCachedActiveConfig(hwc2_config_t *active_config) {
+  int config_index = GetActiveConfigIndex();
+  if ((config_index < 0) || (config_index >= hwc_config_map_.size())) {
+    return GetActiveConfig(active_config);
+  }
+
+  *active_config = static_cast<hwc2_config_t>(hwc_config_map_.at(config_index));
+  return HWC2::Error::None;
+}
+
+void HWCDisplay::SetActiveConfigIndex(int index) {
+  std::lock_guard<std::mutex> lock(active_config_lock_);
+  active_config_index_ = index;
+}
+
+int HWCDisplay::GetActiveConfigIndex() {
+  std::lock_guard<std::mutex> lock(active_config_lock_);
+  return active_config_index_;
+}
+
+HWC2::Error HWCDisplay::GetSupportedContentTypes(hidl_vec<HwcContentType> *types) {
+  types = {};
+
+  return HWC2::Error::None;
+}
+
+HWC2::Error HWCDisplay::SetContentType(HwcContentType type) {
+  if (type == HwcContentType::NONE) {
+    return HWC2::Error::None;
+  }
+
+  return HWC2::Error::Unsupported;
+}
+
+HWC2::Error HWCDisplay::GetClientTargetProperty(ClientTargetProperty *out_client_target_property) {
+
+  Layer *client_layer = client_target_->GetSDMLayer();
+  if (!client_layer->request.flags.update_format) {
+    return HWC2::Error::None;
+  }
+  int32_t format = 0;
+  uint64_t flags = 0;
+  auto err = buffer_allocator_->SetBufferInfo(client_layer->request.format, &format,
+                                              &flags);
+  if (err) {
+    DLOGE("Invalid format: %s requested", GetFormatString(client_layer->request.format));
+    return HWC2::Error::BadParameter;
+  }
+  Dataspace dataspace;
+  DisplayError error = ColorMetadataToDataspace(client_layer->request.color_metadata,
+                                                   &dataspace);
+  if (error != kErrorNone) {
+    DLOGE("Invalid Dataspace requested: Primaries = %d Transfer = %d ds = %d",
+          client_layer->request.color_metadata.colorPrimaries,
+          client_layer->request.color_metadata.transfer, dataspace);
+    return HWC2::Error::BadParameter;
+  }
+  out_client_target_property->dataspace = dataspace;
+  out_client_target_property->pixelFormat =
+      (android::hardware::graphics::common::V1_2::PixelFormat)format;
 
   return HWC2::Error::None;
 }
