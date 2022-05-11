@@ -32,6 +32,8 @@
 
 #include <sync/sync.h>
 
+#include <vector>
+
 #include "gl_layer_stitch.h"
 #include "gl_common.h"
 
@@ -41,17 +43,17 @@ class GLLayerStitchImpl : public GLLayerStitch, public GLCommon {
  public:
   explicit GLLayerStitchImpl(bool secure);
   virtual ~GLLayerStitchImpl();
-  virtual int Blit(const private_handle_t *src_hnd, const private_handle_t *dst_hnd,
-                   const GLRect &src_rect, const GLRect &dst_rect,
-                   const shared_ptr<Fence> &src_acquire_fence,
-                   const shared_ptr<Fence> &dst_acquire_fence,
-                   shared_ptr<Fence> *release_fence);
+  virtual int Blit(const std::vector<StitchParams> &stitch_params, shared_ptr<Fence> *release_fence);
   virtual int CreateContext(bool secure);
   virtual int Init();
   virtual int Deinit();
  private:
   bool secure_ = false;
   GLContext ctx_;
+
+  void InitContext();
+  void ClearWithTransparency(const GLRect &scissor_rect);
+  int NeedsGLScissor(const std::vector<StitchParams> &stitch_params);
 };
 
 }  // namespace sdm
