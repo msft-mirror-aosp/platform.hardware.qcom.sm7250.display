@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2019-2021, The Linux Foundation. All rights reserved.
  * Not a Contribution.
  *
  * Copyright (C) 2017 The Android Open Source Project
@@ -224,7 +224,7 @@ class QtiComposerClient : public IQtiComposerClient {
                           int64_t timestamp, VsyncPeriodNanos vsyncPeriodNanos);
   static void onVsyncPeriodTimingChanged(hwc2_callback_data_t callbackData,
                                            hwc2_display_t display,
-                                           const VsyncPeriodChangeTimeline& updatedTimeline);
+                                           hwc_vsync_period_change_timeline_t* updatedTimeline);
   static void onSeamlessPossible(hwc2_callback_data_t callbackData, hwc2_display_t display);
 
   // Methods for ConcurrentWriteBack
@@ -280,7 +280,8 @@ class QtiComposerClient : public IQtiComposerClient {
     Error validateDisplay(Display display, std::vector<Layer>& changedLayers,
                           std::vector<IComposerClient::Composition>& compositionTypes,
                           uint32_t& displayRequestMask, std::vector<Layer>& requestedLayers,
-                          std::vector<uint32_t>& requestMasks);
+                          std::vector<uint32_t>& requestMasks,
+                          IComposerClient::ClientTargetProperty& clienttargetproperty);
     Error presentDisplay(Display display, shared_ptr<Fence>* presentFence,
                          std::vector<Layer>& layers,
                          std::vector<shared_ptr<Fence>>& releaseFences);

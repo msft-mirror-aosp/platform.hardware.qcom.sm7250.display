@@ -148,6 +148,7 @@ DisplayError CompManager::RegisterDisplay(int32_t display_id, DisplayType type,
   display_comp_ctx->display_id = display_id;
   display_comp_ctx->display_type = type;
   display_comp_ctx->fb_config = fb_config;
+  display_comp_ctx->dest_scaler_blocks_used = mixer_attributes.dest_scaler_blocks_used;
   *display_ctx = display_comp_ctx;
   // New non-primary display device has been added, so move the composition mode to safe mode until
   // resources for the added display is configured properly.
@@ -180,10 +181,6 @@ DisplayError CompManager::UnregisterDisplay(Handle display_ctx) {
 
   registered_displays_.erase(display_comp_ctx->display_id);
   powered_on_displays_.erase(display_comp_ctx->display_id);
-
-  if (display_comp_ctx->display_type == kPluggable) {
-    max_layers_ = kMaxSDELayers;
-  }
 
   DLOGV_IF(kTagCompManager, "Registered displays [%s], display %d-%d",
            StringDisplayList(registered_displays_).c_str(), display_comp_ctx->display_id,
@@ -260,7 +257,7 @@ void CompManager::PrepareStrategyConstraints(Handle comp_handle, HWLayers *hw_la
   StrategyConstraints *constraints = &display_comp_ctx->constraints;
 
   constraints->safe_mode = safe_mode_;
-  constraints->max_layers = max_layers_;
+  constraints->max_layers = hw_res_info_.num_blending_stages;
 
   // Limit 2 layer SDE Comp if its not a Primary Display.
   // Safe mode is the policy for External display on a low end device.
@@ -347,6 +344,10 @@ DisplayError CompManager::Prepare(Handle display_ctx, HWLayers *hw_layers) {
     return error;
   }
 
+  error = resource_intf_->Stop(display_resource_ctx, hw_layers);
+  if (error != kErrorNone) {
+    DLOGE("Resource stop failed for display = %d", display_comp_ctx->display_type);
+  }
   return error;
 }
 
@@ -408,12 +409,6 @@ DisplayError CompManager::PostCommit(Handle display_ctx, HWLayers *hw_layers) {
   DisplayCompositionContext *display_comp_ctx =
                              reinterpret_cast<DisplayCompositionContext *>(display_ctx);
 
-  Handle &display_resource_ctx = display_comp_ctx->display_resource_ctx;
-  error = resource_intf_->Stop(display_resource_ctx, hw_layers);
-  if (error != kErrorNone) {
-    DLOGE("Resource stop failed for display = %d", display_comp_ctx->display_type);
-  }
-
   error = resource_intf_->PostCommit(display_comp_ctx->display_resource_ctx, hw_layers);
   if (error != kErrorNone) {
     return error;
@@ -440,16 +435,18 @@ void CompManager::Purge(Handle display_ctx) {
   display_comp_ctx->strategy->Purge();
 }
 
-DisplayError CompManager::SetIdleTimeoutMs(Handle display_ctx, uint32_t active_ms) {
+DisplayError CompManager::SetIdleTimeoutMs(Handle display_ctx, uint32_t active_ms,
+                                           uint32_t inactive_ms) {
   SCOPE_LOCK(locker_);
 
   DisplayCompositionContext *display_comp_ctx =
                              reinterpret_cast<DisplayCompositionContext *>(display_ctx);
 
-  return display_comp_ctx->strategy->SetIdleTimeoutMs(active_ms);
+  return display_comp_ctx->strategy->SetIdleTimeoutMs(active_ms, inactive_ms);
 }
 
 void CompManager::ProcessIdleTimeout(Handle display_ctx) {
+  DTRACE_SCOPED();
   SCOPE_LOCK(locker_);
 
   DisplayCompositionContext *display_comp_ctx =
@@ -458,7 +455,6 @@ void CompManager::ProcessIdleTimeout(Handle display_ctx) {
   if (!display_comp_ctx) {
     return;
   }
-
   display_comp_ctx->idle_fallback = true;
 }
 
@@ -541,12 +537,13 @@ DisplayError CompManager::GetScaleLutConfig(HWScaleLutInfo *lut_info) {
 DisplayError CompManager::SetDetailEnhancerData(Handle display_ctx,
                                                 const DisplayDetailEnhancerData &de_data) {
   SCOPE_LOCK(locker_);
-  if (!hw_res_info_.hw_dest_scalar_info.count) {
-    return kErrorResources;
-  }
 
   DisplayCompositionContext *display_comp_ctx =
                              reinterpret_cast<DisplayCompositionContext *>(display_ctx);
+
+  if (!display_comp_ctx->dest_scaler_blocks_used) {
+    return kErrorResources;
+  }
 
   return resource_intf_->SetDetailEnhancerData(display_comp_ctx->display_resource_ctx, de_data);
 }
